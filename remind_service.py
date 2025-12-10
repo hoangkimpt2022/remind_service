@@ -174,29 +174,48 @@ def month_range(date_obj):
     first = date_obj.replace(day=1)
     last = (first + relativedelta(months=1) - datetime.timedelta(days=1))
     return first, last
-
-def send_telegram_long(text):
+# ================== THÊM HÀM NÀY VÀO – BẮT BUỘC PHẢI CÓ ==================
+def send_telegram(text):
     """
-    Gửi message dài bằng cách tách thành nhiều phần nếu cần.
-    Sử dụng thay thế cho send_telegram khi message có thể > 3800 ký tự.
+    Hàm gửi tin nhắn Telegram cơ bản.
+    Được gọi bởi job_daily, /check, /done, /new, v.v.
+    Đây là hàm bị thiếu trong file gốc của bạn!
     """
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram not configured. Message would be:\n", text)
+        print("[Telegram Disabled] Message would be sent:\n", text)
         return False
 
-    max_len = 3800
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    parts = [text[i:i+max_len] for i in range(0, len(text), max_len)]
-    for p in parts:
-        try:
-            r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": p, "parse_mode": "HTML"}, timeout=10)
-            if r.status_code != 200:
-                print("Telegram send error:", r.status_code, r.text)
-                return False
-        except Exception as e:
-            print("Telegram send exception:", e)
+    try:
+        response = requests.post(
+            url,
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True
+            },
+            timeout=10
+        )
+        if response.status_code == 200:
+            return True
+        else:
+            print(f"Telegram lỗi {response.status_code}: {response.text}")
             return False
-    return True
+    except Exception as e:
+        print("Telegram gửi thất bại:", e)
+        return False
+
+# (Sau đó để nguyên hàm send_telegram_long của bạn)
+def send_telegram_long(text):
+    """
+    Gửi tin nhắn dài > 4096 ký tự bằng cách chia nhỏ
+    """
+    max_len = 3800
+    parts = [text[i:i+max_len] for i in range(0, len(text), max_len)]
+    for part in parts:
+        send_telegram(part)
+        time.sleep(0.5)  # tránh bị rate limit
 
 # ---------------- Progress bar helper ----------------
 def render_progress_bar(percent, length=18):
@@ -722,7 +741,20 @@ if __name__ == "__main__":
             job_daily()
         except Exception as e:
             print("Error running job_daily on start:", e)
+            # Thông báo bot đã khởi động thành công (rất quan trọng để biết deploy OK)
+        try:
+            startup_msg = f"""
+        Bot nhắc việc đã KHỞI ĐỘNG THÀNH CÔNG!
 
+        Thời gian: {datetime.datetime.now(TZ).strftime('%d/%m/%Y %H:%M')}
+        Múi giờ: {TIMEZONE}
+        Daily job: {REMIND_HOUR:02d}:{REMIND_MINUTE:02d}
+        Hôm nay sẽ nhắc lúc {REMIND_HOUR}:00 nếu có việc
+        """
+            send_telegram(startup_msg.strip())
+            print("Đã gửi tin nhắn khởi động tới Telegram!")
+        except:
+            print("Không gửi được tin nhắn khởi động (có thể do Telegram chưa config)")
     # Decide run mode: Background worker (no Flask) or Webhook (Flask)
     BACKGROUND_WORKER = os.getenv("BACKGROUND_WORKER", "true").lower() in ("1", "true", "yes")
     if BACKGROUND_WORKER:
