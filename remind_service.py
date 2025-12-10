@@ -26,9 +26,7 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 SELF_URL = os.getenv("SELF_URL", "").strip()
 PROP_REL_GOAL = os.getenv("PROP_REL_GOAL", "").strip()
 
-print("ENV CHECK → GOALS_NOTION_DATABASE =", GOALS_DB)
-print("ENV CHECK → PROP_REL_GOAL =", PROP_REL_GOAL)
-print("ENV CHECK → REMIND_NOTION_DATABASE =", REMIND_DB)
+
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
 TZ = pytz.timezone(TIMEZONE)
 
@@ -67,7 +65,9 @@ GOAL_PROP_DONE_TASKS = "Nhiệm vụ đã hoàn thành"
 GOAL_PROP_REMAIN = "Nhiệm vụ còn lại"
 GOAL_PROP_DONE_WEEK = "Nhiệm vụ hoàn thành tuần này"
 GOAL_PROP_DONE_MONTH = "Nhiệm vụ hoàn thành tháng này"
-
+print("ENV CHECK → GOALS_NOTION_DATABASE =", GOALS_DB)
+print("ENV CHECK → PROP_REL_GOAL =", PROP_REL_GOAL)
+print("ENV CHECK → REMIND_NOTION_DATABASE =", REMIND_DB)
 # Cache for /check -> /done mapping
 LAST_TASKS = []
 
@@ -779,5 +779,6 @@ if __name__ == "__main__":
         port = int(os.getenv("PORT", 5000))
         print(f"Starting Flask server on port {port} for webhook mode.")
         app.run(host="0.0.0.0", port=port, threaded=True)
+
 
 
