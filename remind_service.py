@@ -556,46 +556,46 @@ def webhook():
 
     # /done.<n>
     elif text.lower().startswith("/done."):
-    try:
-        # khai báo global phải nằm trước mọi sử dụng/ghép gán
-        global LAST_TASKS
+        try:
+            # khai báo global phải nằm trước mọi sử dụng/ghép gán
+            global LAST_TASKS
 
-        parts = text.split(".", 1)
-        n = int(parts[1])
-        # đảm bảo LAST_TASKS đã tồn tại (module-level), nếu không, gán mặc định là []
-        if 'LAST_TASKS' not in globals() or LAST_TASKS is None:
-            LAST_TASKS = []
+            parts = text.split(".", 1)
+            n = int(parts[1])
+            # đảm bảo LAST_TASKS đã tồn tại (module-level), nếu không, gán mặc định là []
+            if 'LAST_TASKS' not in globals() or LAST_TASKS is None:
+                LAST_TASKS = []
 
-        if 1 <= n <= len(LAST_TASKS):
-            page_id = LAST_TASKS[n-1]
-            now_iso = datetime.datetime.now(TZ).isoformat()
-            props = {}
-            # set Done checkbox
-            props[PROP_DONE] = {"checkbox": True}
-            # set completed date property if present
-            props[PROP_COMPLETED] = {"date": {"start": now_iso}}
-            # update Notion page
-            notion_update_page(page_id, props)
+            if 1 <= n <= len(LAST_TASKS):
+                page_id = LAST_TASKS[n-1]
+                now_iso = datetime.datetime.now(TZ).isoformat()
+                props = {}
+                # set Done checkbox
+                props[PROP_DONE] = {"checkbox": True}
+                # set completed date property if present
+                if PROP_COMPLETED:
+                    props[PROP_COMPLETED] = {"date": {"start": now_iso}}
+                # update Notion page
+                notion_update_page(page_id, props)
 
-            # try fetch page for title (best-effort)
-            title = ""
-            try:
-                p = req_get(f"/pages/{page_id}")
-                title = get_title(p)
-            except Exception:
+                # try fetch page for title (best-effort)
                 title = ""
+                try:
+                    p = req_get(f"/pages/{page_id}")
+                    title = get_title(p)
+                except Exception:
+                    title = ""
 
-            send_telegram(f"✅ Đã đánh dấu Done cho nhiệm vụ số {n}. {title}")
-        else:
-            send_telegram("❌ Số không hợp lệ. Gõ /check để xem danh sách nhiệm vụ tuần này.")
-    except ValueError:
-        # parts[1] không phải số
-        send_telegram("❌ Số không hợp lệ. Gõ /done.<số> (ví dụ /done.1).")
-    except Exception as e:
-        print("Error /done:", e)
-        send_telegram("❌ Lỗi xử lý /done. Hãy dùng /done.<số> (ví dụ /done.1).")
-    return jsonify({"ok": True}), 200
-
+                send_telegram(f"✅ Đã đánh dấu Done cho nhiệm vụ số {n}. {title}")
+            else:
+                send_telegram("❌ Số không hợp lệ. Gõ /check để xem danh sách nhiệm vụ tuần này.")
+        except ValueError:
+            # parts[1] không phải số
+            send_telegram("❌ Số không hợp lệ. Gõ /done.<số> (ví dụ /done.1).")
+        except Exception as e:
+            print("Error /done:", e)
+            send_telegram("❌ Lỗi xử lý /done. Hãy dùng /done.<số> (ví dụ /done.1).")
+        return jsonify({"ok": True}), 200
 
     # /new.<name>.<DDMMYY>.<HHMM>.<priority>
     elif text.lower().startswith("/new."):
