@@ -175,25 +175,6 @@ def month_range(date_obj):
     last = (first + relativedelta(months=1) - datetime.timedelta(days=1))
     return first, last
 
-def send_telegram(text):
-    """
-    Gửi message ngắn qua Telegram.
-    """
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram not configured. Message would be:\n", text)
-        return False
-    
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try:
-        r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
-        if r.status_code != 200:
-            print("Telegram send error:", r.status_code, r.text)
-            return False
-        return True
-    except Exception as e:
-        print("Telegram send exception:", e)
-        return False
-
 def send_telegram_long(text):
     """
     Gửi message dài bằng cách tách thành nhiều phần nếu cần.
@@ -576,17 +557,24 @@ def webhook():
     # /done.<n>
     elif text.lower().startswith("/done."):
         try:
+            # khai báo global phải nằm trước mọi sử dụng/ghép gán
+            global LAST_TASKS
+
             parts = text.split(".", 1)
             n = int(parts[1])
+            # đảm bảo LAST_TASKS đã tồn tại (module-level), nếu không, gán mặc định là []
+            if 'LAST_TASKS' not in globals() or LAST_TASKS is None:
+                LAST_TASKS = []
 
             if 1 <= n <= len(LAST_TASKS):
-                page_id = LAST_TASKS[n-1]
+                page_id = LAST_TASKS[n - 1]
                 now_iso = datetime.datetime.now(TZ).isoformat()
                 props = {}
                 # set Done checkbox
                 props[PROP_DONE] = {"checkbox": True}
                 # set completed date property if present
-                props[PROP_COMPLETED] = {"date": {"start": now_iso}}
+                if PROP_COMPLETED:
+                    props[PROP_COMPLETED] = {"date": {"start": now_iso}}
                 # update Notion page
                 notion_update_page(page_id, props)
 
@@ -608,7 +596,6 @@ def webhook():
             print("Error /done:", e)
             send_telegram("❌ Lỗi xử lý /done. Hãy dùng /done.<số> (ví dụ /done.1).")
         return jsonify({"ok": True}), 200
-
 
     # /new.<name>.<DDMMYY>.<HHMM>.<priority>
     elif text.lower().startswith("/new."):
