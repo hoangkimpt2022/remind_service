@@ -24,7 +24,9 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 SELF_URL = os.getenv("SELF_URL", "").strip()
-
+print("ENV CHECK → GOALS_NOTION_DATABASE =", GOALS_DB)
+print("ENV CHECK → PROP_REL_GOAL =", PROP_REL_GOAL)
+print("ENV CHECK → REMIND_NOTION_DATABASE =", REMIND_DB)
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
 TZ = pytz.timezone(TIMEZONE)
 
@@ -775,3 +777,4 @@ if __name__ == "__main__":
         port = int(os.getenv("PORT", 5000))
         print(f"Starting Flask server on port {port} for webhook mode.")
         app.run(host="0.0.0.0", port=port, threaded=True)
+
