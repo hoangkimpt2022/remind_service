@@ -287,6 +287,96 @@ def read_goal_properties(goal_page):
         if "title" in v and v.get("title"):
             return "".join([t.get("plain_text","") for t in v.get("title",[])])
         return None
+    def extract_prop_text(props: Dict[str, Any], key_like: str) -> str:
+    """
+    Robust extractor for Notion property values.
+    Supports: title, rich_text, number, date, checkbox, select, multi_select, relation, formula, rollup.
+    Returns string (empty if not present).
+    """
+    if not props:
+        return ""
+    k = find_prop_key(props, key_like)
+    if not k:
+        return ""
+    prop = props.get(k, {}) or {}
+    ptype = prop.get("type")
+
+    # FORMULA
+    if ptype == "formula":
+        formula = prop.get("formula", {})
+        ftype = formula.get("type")
+        if ftype == "number" and formula.get("number") is not None:
+            return str(formula.get("number"))
+        if ftype == "string" and formula.get("string"):
+            return str(formula.get("string"))
+        if ftype == "boolean" and formula.get("boolean") is not None:
+            return "1" if formula.get("boolean") else "0"
+        if ftype == "date" and formula.get("date"):
+            return formula["date"].get("start", "")
+        return ""
+
+    # ROLLUP
+    if ptype == "rollup":
+        roll = prop.get("rollup", {})
+        rtype = roll.get("type")
+        if rtype == "number" and roll.get("number") is not None:
+            return str(roll.get("number"))
+        if rtype == "array":
+            arr = roll.get("array", [])
+            if arr:
+                first = arr[0]
+                # attempt to extract number or text
+                if isinstance(first, dict):
+                    if "number" in first and first.get("number") is not None:
+                        return str(first.get("number"))
+                    # for title-like
+                    if "title" in first:
+                        return extract_plain_text_from_rich_text(first.get("title", []))
+                    if "plain_text" in first:
+                        return first.get("plain_text", "")
+                return str(first)
+        return ""
+
+    # TITLE
+    if ptype == "title":
+        return extract_plain_text_from_rich_text(prop.get("title", []))
+    if ptype == "rich_text":
+        return extract_plain_text_from_rich_text(prop.get("rich_text", []))
+    if ptype == "number":
+        return str(prop.get("number"))
+    if ptype == "date":
+        d = prop.get("date", {}) or {}
+        return d.get("start", "") or ""
+    if ptype == "checkbox":
+        return "1" if prop.get("checkbox") else "0"
+    if ptype == "select":
+        sel = prop.get("select") or {}
+        return sel.get("name", "")
+    if ptype == "multi_select":
+        arr = prop.get("multi_select") or []
+        return ", ".join(a.get("name", "") for a in arr)
+    if ptype == "relation":
+        rel = prop.get("relation") or []
+        if rel:
+            # return first relation id
+            return rel[0].get("id", "")
+    return ""
+    def read_goal_properties(page):
+    props = page.get("properties", {}) or {}
+
+    return {
+    "id": page.get("id", ""),
+    "title": extract_prop_text(props, "Name"),
+    "start": extract_prop_text(props, "Ngày bắt đầu"),
+    "end": extract_prop_text(props, "Ngày hoàn thành"),
+    "countdown": extract_prop_text(props, "Đếm ngược"),
+    "progress": extract_prop_text(props, "Tiến Độ"),
+    "total_tasks": extract_prop_text(props, "Tổng nhiệm vụ cần làm"),
+    "done_tasks": extract_prop_text(props, "Nhiệm vụ đã hoàn thành"),
+    "remain_tasks": extract_prop_text(props, "Nhiệm vụ còn lại"),
+    "week_done": extract_prop_text(props, "Nhiệm vụ hoàn thành tuần này"),
+    "month_done": extract_prop_text(props, "Nhiệm vụ hoàn thành tháng này"),
+    }
 
     out = {}
     out["id"] = goal_page.get("id")
@@ -779,6 +869,7 @@ if __name__ == "__main__":
         port = int(os.getenv("PORT", 5000))
         print(f"Starting Flask server on port {port} for webhook mode.")
         app.run(host="0.0.0.0", port=port, threaded=True)
+
 
 
 
