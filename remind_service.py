@@ -538,128 +538,146 @@ def job_monthly():
 # ---------------- Telegram webhook handlers ----------------
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    update = request.json or {}
-    message = update.get("message", {}) or {}
-    chat_id = str(message.get("chat", {}).get("id", ""))
-    if TELEGRAM_CHAT_ID and chat_id != TELEGRAM_CHAT_ID:
-        return jsonify({"ok": False}), 403
-    text = (message.get("text", "") or "").strip()
-    if not text.startswith("/"):
-        return jsonify({"ok": True}), 200
+    """
+    Webhook handler for Telegram commands.
+    Supported commands:
+      /check                 -> list this week's tasks (and overdue)
+      /done.<n>              -> mark the nth task from last /check as done
+      /new.<name>.<DDMMYY>.<HHMM>.<priority>  -> create a new task
+    """
+    # ONE global declaration at the top (must appear before any assignment)
+    global LAST_TASKS
 
-    # /check : show tasks for this week (and overdue)
-    if text.lower() == "/check":
-        global LAST_TASKS  # Khai báo global ở đầu khối để tránh SyntaxError
-        now = datetime.datetime.now(TZ).date()
-        start_week, end_week = week_range(now)
-        filters = [
-            {"property": PROP_DONE, "checkbox": {"equals": False}},
-            {"or": [
-                {"property": PROP_DUE, "date": {"on_or_after": start_week.isoformat(), "on_or_before": end_week.isoformat()}},
-                {"property": PROP_DUE, "date": {"before": now.isoformat()}}
-            ]}
-        ]
-        if PROP_ACTIVE:
-            filters.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
-        tasks = notion_query(REMIND_DB, {"and": filters})
-        if not tasks:
-            send_telegram("🎉 Không có nhiệm vụ trong tuần này hoặc quá hạn để hiển thị.")
+    try:
+        update = request.get_json(silent=True) or {}
+        message = update.get("message", {}) or {}
+        chat_id = str(message.get("chat", {}).get("id", ""))
+        if TELEGRAM_CHAT_ID and chat_id != TELEGRAM_CHAT_ID:
+            return jsonify({"ok": False, "error": "forbidden chat id"}), 403
+
+        text = (message.get("text", "") or "").strip()
+        if not text.startswith("/"):
             return jsonify({"ok": True}), 200
-        lines = [f"🔔 <b>Danh sách nhiệm vụ tuần {start_week.strftime('%d/%m')} - {end_week.strftime('%d/%m')}</b>", ""]
-        for i, p in enumerate(tasks, start=1):
-            lines.append(format_task_line(i, p))
-        LAST_TASKS = [p.get("id") for p in tasks]  # Gán sau global
-        send_telegram("\n".join(lines))
-        return jsonify({"ok": True}), 200
 
-    # /done.<n>
-    elif text.lower().startswith("/done."):
-        global LAST_TASKS  # Khai báo global ở đầu khối để tránh SyntaxError
-        try:
-            parts = text.split(".", 1)
-            n = int(parts[1])
-            # Đảm bảo LAST_TASKS đã tồn tại (module-level), nếu không, gán mặc định là []
-            if 'LAST_TASKS' not in globals() or LAST_TASKS is None:
+        cmd = text.strip()
+
+        # ---------- /check ----------
+        if cmd.lower() == "/check":
+            now = datetime.datetime.now(TZ).date()
+            start_week, end_week = week_range(now)
+            filters = [
+                {"property": PROP_DONE, "checkbox": {"equals": False}},
+                {"or": [
+                    {"property": PROP_DUE, "date": {"on_or_after": start_week.isoformat(),
+                                                    "on_or_before": end_week.isoformat()}},
+                    {"property": PROP_DUE, "date": {"before": now.isoformat()}}
+                ]}
+            ]
+            if PROP_ACTIVE:
+                filters.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
+
+            tasks = notion_query(REMIND_DB, {"and": filters})
+            if not tasks:
                 LAST_TASKS = []
-            if 1 <= n <= len(LAST_TASKS):
-                page_id = LAST_TASKS[n - 1]
-                now_iso = datetime.datetime.now(TZ).isoformat()
-                props = {}
-                # set Done checkbox
-                props[PROP_DONE] = {"checkbox": True}
-                # set completed date property if present
-                if PROP_COMPLETED:
-                    props[PROP_COMPLETED] = {"date": {"start": now_iso}}
-                # update Notion page
-                notion_update_page(page_id, props)
+                send_telegram("🎉 Không có nhiệm vụ trong tuần này hoặc quá hạn để hiển thị.")
+                return jsonify({"ok": True}), 200
 
-                # try fetch page for title (best-effort)
-                title = ""
-                try:
-                    p = req_get(f"/pages/{page_id}")
-                    title = get_title(p)
-                except Exception:
-                    title = ""
+            lines = [f"🔔 <b>Danh sách nhiệm vụ tuần {start_week.strftime('%d/%m')} - {end_week.strftime('%d/%m')}</b>", ""]
+            for i, p in enumerate(tasks, start=1):
+                lines.append(format_task_line(i, p))
 
-                send_telegram(f"✅ Đã đánh dấu Done cho nhiệm vụ số {n}. {title}")
-            else:
+            # cache ids for /done
+            LAST_TASKS = [p.get("id") for p in tasks]
+            send_telegram("\n".join(lines).strip())
+            return jsonify({"ok": True, "count": len(LAST_TASKS)}), 200
+
+        # ---------- /done.<n> ----------
+        elif cmd.lower().startswith("/done."):
+            # ensure LAST_TASKS is a list
+            if not isinstance(LAST_TASKS, list):
+                LAST_TASKS = []
+
+            parts = cmd.split(".", 1)
+            if len(parts) < 2 or not parts[1].strip().isdigit():
+                send_telegram("❌ Số không hợp lệ. Gõ /done.<số> (ví dụ /done.1).")
+                return jsonify({"ok": True}), 200
+
+            n = int(parts[1].strip())
+            if n < 1 or n > len(LAST_TASKS):
                 send_telegram("❌ Số không hợp lệ. Gõ /check để xem danh sách nhiệm vụ tuần này.")
-        except ValueError:
-            # parts[1] không phải số
-            send_telegram("❌ Số không hợp lệ. Gõ /done.<số> (ví dụ /done.1).")
-        except Exception as e:
-            print("Error /done:", e)
-            send_telegram("❌ Lỗi xử lý /done. Hãy dùng /done.<số> (ví dụ /done.1).")
-        return jsonify({"ok": True}), 200
+                return jsonify({"ok": True}), 200
 
-    # /new.<name>.<DDMMYY>.<HHMM>.<priority>
-    elif text.lower().startswith("/new."):
-        payload = text[5:]
-        parts = payload.split(".")
-        if len(parts) < 2:
-            send_telegram("❌ Format sai! Ví dụ: /new.Gọi khách 150tr.081225.0900.cao")
+            page_id = LAST_TASKS[n - 1]
+            now_iso = datetime.datetime.now(TZ).isoformat()
+            props = {PROP_DONE: {"checkbox": True}}
+            if PROP_COMPLETED:
+                props[PROP_COMPLETED] = {"date": {"start": now_iso}}
+
+            notion_update_page(page_id, props)
+            title = ""
+            try:
+                p = req_get(f"/pages/{page_id}")
+                title = get_title(p)
+            except Exception:
+                title = ""
+            send_telegram(f"✅ Đã đánh dấu Done cho nhiệm vụ số {n}. {title}")
             return jsonify({"ok": True}), 200
-        name = parts[0].strip()
-        date_part = parts[1].strip()
-        time_part = parts[2].strip() if len(parts) >= 3 else "0000"
-        priority = parts[3].strip().lower() if len(parts) >= 4 else "thấp"
-        # parse date
-        try:
-            if len(date_part) == 6:
-                dd = int(date_part[0:2]); mm = int(date_part[2:4]); yy = int(date_part[4:6]); yyyy = 2000 + yy
-            elif len(date_part) == 8:
-                dd = int(date_part[0:2]); mm = int(date_part[2:4]); yyyy = int(date_part[4:8])
+
+        # ---------- /new.<...> ----------
+        elif cmd.lower().startswith("/new."):
+            payload = cmd[5:]
+            parts = payload.split(".")
+            if len(parts) < 2:
+                send_telegram("❌ Format sai! Ví dụ: /new.Gọi khách 150tr.081225.0900.cao")
+                return jsonify({"ok": True}), 200
+
+            name = parts[0].strip()
+            date_part = parts[1].strip()
+            time_part = parts[2].strip() if len(parts) >= 3 else "0000"
+            priority = parts[3].strip().lower() if len(parts) >= 4 else "thấp"
+
+            try:
+                if len(date_part) == 6:  # DDMMYY
+                    dd = int(date_part[0:2]); mm = int(date_part[2:4]); yy = int(date_part[4:6]); yyyy = 2000 + yy
+                elif len(date_part) == 8:  # DDMMYYYY
+                    dd = int(date_part[0:2]); mm = int(date_part[2:4]); yyyy = int(date_part[4:8])
+                else:
+                    raise ValueError("Bad date format")
+                hh = int(time_part[0:2]) if len(time_part) >= 2 else 0
+                mi = int(time_part[2:4]) if len(time_part) >= 4 else 0
+                dt = datetime.datetime(yyyy, mm, dd, hh, mi)
+                iso_due = TZ.localize(dt).isoformat()
+            except Exception:
+                send_telegram("❌ Không parse được ngày/giờ. Format ví dụ: DDMMYY (081225) và HHMM (0900).")
+                return jsonify({"ok": True}), 200
+
+            props = {PROP_TITLE: {"title": [{"text": {"content": name}}]}}
+            if PROP_DUE:
+                props[PROP_DUE] = {"date": {"start": iso_due}}
+            if PROP_PRIORITY:
+                props[PROP_PRIORITY] = {"select": {"name": priority.capitalize()}}
+            if PROP_TYPE:
+                props[PROP_TYPE] = {"select": {"name": "Hằng ngày"}}
+            if PROP_ACTIVE:
+                props[PROP_ACTIVE] = {"checkbox": True}
+            if PROP_DONE:
+                props[PROP_DONE] = {"checkbox": False}
+
+            newp = notion_create_page(REMIND_DB, props)
+            if newp:
+                send_telegram(f"✅ Đã tạo nhiệm vụ: {name} — hạn: {dt.strftime('%d/%m/%Y %H:%M')} — cấp độ: {priority}")
             else:
-                raise ValueError("Bad date")
-            hh = int(time_part[0:2]) if len(time_part) >= 2 else 0
-            mi = int(time_part[2:4]) if len(time_part) >= 4 else 0
-            dt = datetime.datetime(yyyy, mm, dd, hh, mi)
-            iso_due = TZ.localize(dt).isoformat()
-        except Exception:
-            send_telegram("❌ Không parse được ngày/giờ. Format ví dụ: DDMMYY (081225) và HHMM (0900).")
+                send_telegram("❌ Lỗi tạo nhiệm vụ. Kiểm tra token và database id.")
             return jsonify({"ok": True}), 200
 
-        props = {}
-        props[PROP_TITLE] = {"title": [{"text": {"content": name}}]}
-        if PROP_DUE:
-            props[PROP_DUE] = {"date": {"start": iso_due}}
-        if PROP_PRIORITY:
-            props[PROP_PRIORITY] = {"select": {"name": priority.capitalize()}}
-        if PROP_TYPE:
-            props[PROP_TYPE] = {"select": {"name": "Hằng ngày"}}
-        if PROP_ACTIVE:
-            props[PROP_ACTIVE] = {"checkbox": True}
-        if PROP_DONE:
-            props[PROP_DONE] = {"checkbox": False}
-        newp = notion_create_page(REMIND_DB, props)
-        if newp:
-            send_telegram(f"✅ Đã tạo nhiệm vụ: {name} — hạn: {dt.strftime('%d/%m/%Y %H:%M')} — cấp độ: {priority}")
-        else:
-            send_telegram("❌ Lỗi tạo nhiệm vụ. Kiểm tra token và database id.")
+        # unknown command
+        send_telegram("❓ Lệnh không nhận diện. Dùng /check, /done.<n>, /new.<tên>.<DDMMYY>.<HHMM>.<cấp độ>")
         return jsonify({"ok": True}), 200
 
-    send_telegram("❓ Lệnh không nhận diện. Dùng /check, /done.<n>, /new.<tên>.<DDMMYY>.<HHMM>.<cấp độ>")
-    return jsonify({"ok": True}), 200
+    except Exception as e:
+        print("Unhandled exception in webhook:", e)
+        send_telegram("❌ Lỗi nội bộ khi xử lý lệnh. Vui lòng thử lại sau.")
+        return jsonify({"ok": True}), 200
 
 @app.route("/debug/schema", methods=["GET"])
 def debug_schema():
