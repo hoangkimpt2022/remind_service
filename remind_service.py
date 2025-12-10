@@ -174,7 +174,7 @@ def month_range(date_obj):
     first = date_obj.replace(day=1)
     last = (first + relativedelta(months=1) - datetime.timedelta(days=1))
     return first, last
-# ================== THÊM HÀM NÀY VÀO – BẮT BUỘC PHẢI CÓ ==================
+
 def send_telegram(text):
     """
     Hàm gửi tin nhắn Telegram cơ bản.
@@ -329,7 +329,6 @@ def format_task_line(i, page):
 
 # ---------------- Jobs (daily / weekly / monthly) ----------------
 def job_daily():
-    global LAST_TASKS  # Khai báo global ở đầu hàm để tránh SyntaxError
     now = datetime.datetime.now(TZ)
     today = now.date()
     start_week, end_week = week_range(today)
@@ -426,7 +425,9 @@ def job_daily():
 
     send_telegram("\n".join(lines).strip())
 
-    LAST_TASKS = [p.get("id") for p in weekly_tasks]  # Gán sau global
+    # Cache LAST_TASKS for /done
+    global LAST_TASKS
+    LAST_TASKS = [p.get("id") for p in weekly_tasks]
 
 def job_weekly():
     now = datetime.datetime.now(TZ).date()
@@ -716,7 +717,10 @@ def set_telegram_webhook():
     if TELEGRAM_TOKEN and WEBHOOK_URL:
         try:
             r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook", data={"url": WEBHOOK_URL}, timeout=10)
-            print("setWebhook response:", r.text)
+            try:
+                print("setWebhook response:", r.status_code, r.json())
+            except:
+                print("setWebhook response:", r.status_code, r.text)
         except Exception as e:
             print("Error setting webhook:", e)
 
@@ -755,20 +759,7 @@ if __name__ == "__main__":
             job_daily()
         except Exception as e:
             print("Error running job_daily on start:", e)
-            # Thông báo bot đã khởi động thành công (rất quan trọng để biết deploy OK)
-        try:
-            startup_msg = f"""
-        Bot nhắc việc đã KHỞI ĐỘNG THÀNH CÔNG!
 
-        Thời gian: {datetime.datetime.now(TZ).strftime('%d/%m/%Y %H:%M')}
-        Múi giờ: {TIMEZONE}
-        Daily job: {REMIND_HOUR:02d}:{REMIND_MINUTE:02d}
-        Hôm nay sẽ nhắc lúc {REMIND_HOUR}:00 nếu có việc
-        """
-            send_telegram(startup_msg.strip())
-            print("Đã gửi tin nhắn khởi động tới Telegram!")
-        except:
-            print("Không gửi được tin nhắn khởi động (có thể do Telegram chưa config)")
     # Decide run mode: Background worker (no Flask) or Webhook (Flask)
     BACKGROUND_WORKER = os.getenv("BACKGROUND_WORKER", "true").lower() in ("1", "true", "yes")
     if BACKGROUND_WORKER:
