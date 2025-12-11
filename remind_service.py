@@ -403,15 +403,42 @@ def safe_rollup_number(props: dict, name: str):
     return len(arr) if isinstance(arr, list) else None
 
 def read_goal_properties(goal_page):
+    """
+    Robust reader for goal page properties.
+    Accepts None, returns a dict with keys used by job logic.
+    Normalizes progress into progress_pct (int 0..100) if possible.
+    """
+    out = {
+        "id": "",
+        "title": "(no title)",
+        "trang_thai": None,
+        "ngay_bat_dau": None,
+        "ngay_hoan_thanh": None,
+        "dem_nguoc_formula": None,
+        "tien_do_formula": None,
+        "tong_nhiem_vu_rollup": None,
+        "nhiem_vu_da_hoan_rollup": None,
+        "nhiem_vu_con_lai_formula": None,
+        "nhiem_vu_hoan_tuan_rollup": None,
+        "nhiem_vu_hoan_thang_rollup": None,
+        "days_remaining_computed": None,
+        "progress_pct": None
+    }
+
+    if not goal_page or not isinstance(goal_page, dict):
+        return out
+
     props = goal_page.get("properties", {}) or {}
-    out = {}
-    out["id"] = goal_page.get("id", "")
+    out["id"] = goal_page.get("id", "") or ""
+    # find title
     title = ""
-    for k,v in props.items():
+    for k, v in props.items():
         if v.get("type") == "title":
             title = extract_plain_text_from_rich_text(v.get("title", []))
             break
     out["title"] = title or get_title(goal_page) or out["id"]
+
+    # safe extraction using existing helpers
     out["trang_thai"] = safe_select(props, GOAL_PROP_STATUS)
     out["ngay_bat_dau"] = safe_date(props, GOAL_PROP_START)
     out["ngay_hoan_thanh"] = safe_date(props, GOAL_PROP_END)
@@ -422,42 +449,43 @@ def read_goal_properties(goal_page):
     out["nhiem_vu_con_lai_formula"] = safe_formula(props, GOAL_PROP_REMAIN)
     out["nhiem_vu_hoan_tuan_rollup"] = safe_rollup_number(props, GOAL_PROP_DONE_WEEK)
     out["nhiem_vu_hoan_thang_rollup"] = safe_rollup_number(props, GOAL_PROP_DONE_MONTH)
-    out["days_remaining_computed"] = None
+
+    # compute days_remaining_computed if formula missing but end date present
     if out.get("dem_nguoc_formula") is None and out.get("ngay_hoan_thanh"):
         try:
             today = datetime.datetime.now(TZ).date()
             out["days_remaining_computed"] = (out["ngay_hoan_thanh"] - today).days
-        except:
+        except Exception:
             out["days_remaining_computed"] = None
-            # --------- Normalize progress (formula or rollup) into integer percent ---------
+
+    # --------- Normalize progress (formula or rollup) into integer percent ---------
+    progress_pct = None
+    raw_prog = out.get("tien_do_formula")
+    if raw_prog is not None:
+        try:
+            s = str(raw_prog).strip()
+            if s.endswith("%"):
+                s = s[:-1].strip()
+            val = float(s)
+            if val <= 1:
+                val = val * 100
+            progress_pct = int(round(val))
+        except Exception:
             progress_pct = None
 
-            raw_prog = out.get("tien_do_formula")
-            if raw_prog is not None:
-                try:
-                    s = str(raw_prog).strip()
-                    if s.endswith("%"):
-                        s = s[:-1].strip()
-                    val = float(s)
-                    # Nếu Notion trả 0.33 → hiểu là 33%
-                    if val <= 1:
-                        val = val * 100
-                    progress_pct = int(round(val))
-                except:
-                    progress_pct = None
+    # fallback when formula missing -> use rollups
+    if progress_pct is None:
+        try:
+            total = out.get("tong_nhiem_vu_rollup")
+            done = out.get("nhiem_vu_da_hoan_rollup")
+            if total and (done is not None):
+                progress_pct = int(round(float(done) / float(total) * 100)) if total > 0 else 0
+        except Exception:
+            progress_pct = None
 
-            # fallback khi formula không có giá trị
-            if progress_pct is None:
-                try:
-                    total = out.get("tong_nhiem_vu_rollup")
-                    done = out.get("nhiem_vu_da_hoan_rollup")
-                    if total and done is not None:
-                        progress_pct = int(round(done / total * 100))
-                except:
-                    progress_pct = None
+    out["progress_pct"] = progress_pct
 
-            out["progress_pct"] = progress_pct
-            return out
+    return out
 
 # ---------------- Build task text ----------------
 def format_task_line(i, page):
@@ -483,143 +511,153 @@ def format_task_line(i, page):
 def job_daily():
     now = datetime.datetime.now(TZ)
     today = now.date()
-    # For daily notifications we only want tasks whose due date is exactly today
-    # Build filter: not done AND due on today
+
+    print("[INFO] job_daily start, today =", today.isoformat())
+
+    # Query tasks for "hôm nay" (not done & due today)
     filters = [
         {"property": PROP_DONE, "checkbox": {"equals": False}},
         {"property": PROP_DUE, "date": {"on_or_after": today.isoformat(), "on_or_before": today.isoformat()}}
     ]
     if PROP_ACTIVE:
-        # only add active filter if configured and non-empty (but ensure property exists in DB)
         filters.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
 
     try:
         tasks = notion_query(REMIND_DB, {"and": filters})
+        print(f"[DBG] fetched {len(tasks)} tasks due today from REMIND_DB")
     except Exception as e:
         print("[WARN] job_daily: notion_query REMIND_DB failed:", e)
         tasks = []
 
-    # build header: count tasks due today
-    weekly_tasks = tasks  # rename for compatibility with existing code
-    lines = [f"🔔 <b>Hôm nay {today.strftime('%d/%m/%Y')} sếp có {len(weekly_tasks)} nhiệm vụ hằng ngày</b>", ""]
-    for i, p in enumerate(weekly_tasks, start=1):
-        # format: include due datetime if available
-        due_dt = get_date_start(p, PROP_DUE)
-        due_text = f" — hạn: {format_dt(due_dt)}" if due_dt else ""
-        pri = get_select_name(p, PROP_PRIORITY) or ""
-        # if done flagged somehow slipped in, ensure we skip
-        if get_checkbox(p, PROP_DONE):
-            continue
-        # line with date/time
-        title = get_title(p)
-        delta = overdue_days(p)
-        if delta is None:
-            note = ""
-            sym = "🟡"
-        else:
-            if delta > 0:
-                sym = "🔴"; note = f"↳ Đã trễ {delta} ngày, làm ngay đi sếp ơi!"
-            elif delta == 0:
-                sym = "🟡"; note = "↳💥Làm Ngay Hôm nay!"
+    # Build header and task lines (only tasks due today)
+    lines = [f"🔔 <b>Hôm nay {today.strftime('%d/%m/%Y')} sếp có {len(tasks)} nhiệm vụ hằng ngày</b>", ""]
+    for i, p in enumerate(tasks, start=1):
+        try:
+            # skip if page missing
+            if not p or not isinstance(p, dict):
+                print("[WARN] skipping invalid task object at index", i)
+                continue
+            # skip tasks actually marked done
+            if get_checkbox(p, PROP_DONE):
+                print("[DBG] skipping task (already done):", get_title(p))
+                continue
+            title = get_title(p)
+            pri = get_select_name(p, PROP_PRIORITY) or ""
+            due_dt = get_date_start(p, PROP_DUE)
+            due_text = f" — hạn: {format_dt(due_dt)}" if due_dt else ""
+            d = overdue_days(p)
+            if d is None:
+                sym = "🟡"; note = ""
             else:
-                sym = "🟢"; note = f"↳Còn {abs(delta)} ngày nữa"
-        lines.append(f"{i} {sym} <b>{title}</b> — Cấp độ: {pri}{due_text}\n  {note}".rstrip())
+                if d > 0:
+                    sym = "🔴"; note = f"↳ Đã trễ {d} ngày, làm ngay đi sếp ơi!"
+                elif d == 0:
+                    sym = "🟡"; note = "↳💥Làm Ngay Hôm nay!"
+                else:
+                    sym = "🟢"; note = f"↳Còn {abs(d)} ngày nữa"
+            lines.append(f"{i} {sym} <b>{title}</b> — Cấp độ: {pri}{due_text}\n  {note}".rstrip())
+        except Exception as ex:
+            print("[ERROR] formatting task line:", ex)
+            continue
 
-    # Goals: show only goals that have related tasks due today (and tasks must be not done)
+    # Goals: only include goals that have related tasks due today (and not done)
     goal_lines = []
     total_goal_tasks_due = 0
     if GOALS_DB:
         try:
             goals = notion_query(GOALS_DB)
+            print(f"[DBG] fetched {len(goals)} goals from GOALS_DB")
         except Exception as e:
             print("[WARN] job_daily: notion_query GOALS_DB failed:", e)
             goals = []
 
         for g in goals:
-            ginfo = read_goal_properties(g)
-            # progress pct available now in ginfo["progress_pct"]
-            if ginfo.get("dem_nguoc_formula") is not None:
-                countdown_text = str(ginfo["dem_nguoc_formula"])
-            elif ginfo.get("days_remaining_computed") is not None:
-                d = ginfo["days_remaining_computed"]
-                if d > 0:
-                    countdown_text = f"còn {d} ngày"
-                elif d == 0:
-                    countdown_text = "hết hạn hôm nay"
-                else:
-                    countdown_text = f"đã trễ {-d} ngày"
-            else:
-                countdown_text = "không có thông tin ngày hoàn thành"
+            try:
+                if not g or not isinstance(g, dict):
+                    print("[WARN] skipping invalid goal object:", g)
+                    continue
+                g_id = g.get("id", "(no-id)")
+                ginfo = read_goal_properties(g)
+                # query related tasks: relation contains goal id, not done, due today
+                rel_filter = {
+                    "and": [
+                        {"property": PROP_REL_GOAL, "relation": {"contains": g_id}},
+                        {"property": PROP_DONE, "checkbox": {"equals": False}},
+                        {"property": PROP_DUE, "date": {"on_or_after": today.isoformat(), "on_or_before": today.isoformat()}}
+                    ]
+                }
+                related_tasks = notion_query(REMIND_DB, rel_filter)
+                print(f"[DBG] goal {g_id} '{ginfo.get('title')}' related_tasks_count={len(related_tasks)}")
+                if not related_tasks:
+                    continue
 
-            # query related tasks but only those due today and not done
-            related_tasks = []
-            if PROP_REL_GOAL:
-                try:
-                    rel_filter = {
-                        "and": [
-                            {"property": PROP_REL_GOAL, "relation": {"contains": g.get("id")}},
-                            {"property": PROP_DONE, "checkbox": {"equals": False}},
-                            {"property": PROP_DUE, "date": {"on_or_after": today.isoformat(), "on_or_before": today.isoformat()}}
-                        ]
-                    }
-                    related_tasks = notion_query(REMIND_DB, rel_filter)
-                except Exception as e:
-                    print("[WARN] job_daily: failed to query related tasks for goal", g.get("id"), e)
-                    related_tasks = []
-
-            # debug
-            # print(f"[DBG] goal {g.get('id')} related_tasks_count={len(related_tasks)}")
-
-            if related_tasks:
-                # count them
+                # there are related tasks due today -> include goal in message
                 total_goal_tasks_due += len(related_tasks)
-                # header for goal: include start date if present
                 start_text = format_dt(ginfo.get("ngay_bat_dau")) if ginfo.get("ngay_bat_dau") else ""
-                header = f"🎯 Mục tiêu: <b>{ginfo.get('title') or '(no title)'}</b> — {countdown_text}"
+                header = f"🎯 Mục tiêu: <b>{ginfo.get('title') or g_id}</b> — "
+                # countdown prefer formula else computed days_remaining_computed
+                if ginfo.get("dem_nguoc_formula") is not None:
+                    header += str(ginfo.get("dem_nguoc_formula"))
+                elif ginfo.get("days_remaining_computed") is not None:
+                    drem = ginfo.get("days_remaining_computed")
+                    header += (f"còn {drem} ngày" if drem > 0 else ("hết hạn hôm nay" if drem == 0 else f"đã trễ {-drem} ngày"))
+                else:
+                    header += "không có thông tin ngày hoàn thành"
                 if start_text:
                     header += f" — bắt đầu: {start_text}"
                 goal_lines.append(header)
 
-                # show progress if available
+                # progress
                 pct = ginfo.get("progress_pct")
                 if pct is not None:
                     goal_lines.append(f"   → Tiến độ: {pct}% {render_progress_bar(pct)}")
                 else:
                     goal_lines.append(f"   → Tiến độ: không có dữ liệu")
 
-                # list the related tasks due today (we already filtered to due today and not done)
+                # list related tasks
                 for p in related_tasks:
-                    title = get_title(p)
-                    pri = get_select_name(p, PROP_PRIORITY) or ""
-                    due_dt = get_date_start(p, PROP_DUE)
-                    due_text = f" — hạn: {format_dt(due_dt)}" if due_dt else ""
-                    # determine note based on overdue_days()
-                    d = overdue_days(p)
-                    if d is None:
-                        note = "↳Chưa có hạn"
-                        sym = "🟡"
-                    else:
-                        if d > 0:
-                            note = f"↳🔴Đã trễ {d} ngày, làm ngay đi sếp ơi!"
-                            sym = "🔴"
-                        elif d == 0:
-                            note = "↳💥Làm Ngay Hôm nay!"
-                            sym = "🟡"
+                    try:
+                        if not p or not isinstance(p, dict):
+                            continue
+                        title = get_title(p)
+                        pri = get_select_name(p, PROP_PRIORITY) or ""
+                        due_dt = get_date_start(p, PROP_DUE)
+                        due_text = f" — hạn: {format_dt(due_dt)}" if due_dt else ""
+                        d = overdue_days(p)
+                        if d is None:
+                            note = "↳Chưa có hạn"; sym = "🟡"
                         else:
-                            note = f"↳Còn {abs(d)} ngày nữa"
-                            sym = "🟢"
-                    goal_lines.append(f"   - {sym} {title} — Cấp độ: {pri}{due_text}\n     {note}")
+                            if d > 0:
+                                note = f"↳🔴Đã trễ {d} ngày, làm ngay đi sếp ơi!"; sym = ""
+                            elif d == 0:
+                                note = "↳💥Làm Ngay Hôm nay!"; sym = ""
+                            else:
+                                note = f"↳Còn {abs(d)} ngày nữa"; sym = "🟢"
+                        goal_lines.append(f"   - {sym} {title} — Cấp độ: {pri}{due_text}\n     {note}")
+                    except Exception as ex2:
+                        print("[ERROR] listing related task:", ex2)
+                        continue
+
+            except Exception as eg:
+                print("[ERROR] processing goal:", eg)
+                continue
 
     if total_goal_tasks_due:
         lines.append("")
-        lines.append(f"🎯  sếp có {total_goal_tasks_due} nhiệm vụ Mục tiêu")
+        lines.append(f"🎯 sếp có {total_goal_tasks_due} nhiệm vụ Mục tiêu")
         lines.extend(goal_lines)
 
-    send_telegram("\n".join(lines).strip())
+    try:
+        send_telegram("\n".join(lines).strip())
+    except Exception as e:
+        print("[ERROR] send_telegram failed:", e)
 
-    # update LAST_TASKS for /done use (only tasks due today)
-    global LAST_TASKS
-    LAST_TASKS = [p.get("id") for p in weekly_tasks]
+    # cache LAST_TASKS (for /done) from today's tasks
+    try:
+        global LAST_TASKS
+        LAST_TASKS = [p.get("id") for p in tasks if p and isinstance(p, dict)]
+    except Exception:
+        LAST_TASKS = []
 
 def job_weekly():
     now = datetime.datetime.now(TZ).date()
