@@ -845,6 +845,9 @@ def webhook():
         cmd = text.strip()
         # /check : show tasks for this week (and overdue)
         if text.lower() == "/check":
+            import traceback
+            # ensure we declare global before any assignment in this function scope
+            global LAST_TASKS
             try:
                 now = datetime.datetime.now(TZ).date()
                 start_week, end_week = week_range(now)
@@ -860,7 +863,11 @@ def webhook():
                 if PROP_ACTIVE:
                     filters.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
 
+                # debug: print filters to logs
+                print("[DBG] /check filters:", filters)
+
                 tasks = notion_query(REMIND_DB, {"and": filters}) or []
+                print(f"[DBG] /check got {len(tasks)} tasks from Notion")
 
                 # If no tasks, respond early
                 if not tasks:
@@ -872,21 +879,44 @@ def webhook():
 
                 # For each task, format a line including due datetime and priority; skip any tasks that somehow are marked done
                 visible_tasks = []
-                for i, p in enumerate(tasks, start=1):
+                for p in tasks:
                     try:
                         # defensive: ensure dict
                         if not p or not isinstance(p, dict):
+                            print("[WARN] /check skipping invalid page object:", p)
                             continue
                         # skip if page is marked done (double-check)
-                        if get_checkbox(p, PROP_DONE):
-                            continue
+                        try:
+                            if get_checkbox(p, PROP_DONE):
+                                print("[DBG] /check skipping task already done:", get_title(p))
+                                continue
+                        except Exception:
+                            # if get_checkbox fails, continue but log
+                            print("[WARN] get_checkbox failed for page", p.get("id"))
+
                         title = get_title(p)
                         pri = get_select_name(p, PROP_PRIORITY) or ""
                         # due date/time
-                        due_dt = get_date_start(p, PROP_DUE)
-                        due_text = f" — hạn: {format_dt(due_dt)}" if due_dt else ""
+                        due_dt = None
+                        try:
+                            due_dt = get_date_start(p, PROP_DUE)
+                        except Exception:
+                            # fallback: try to extract as text
+                            try:
+                                due_text_raw = extract_prop_text(p.get("properties", {}) or {}, PROP_DUE)
+                                # don't try to parse here; we'll just show raw if present
+                                if due_text_raw:
+                                    due_dt = due_text_raw
+                            except Exception:
+                                due_dt = None
+
+                        due_text = f" — hạn: {format_dt(due_dt) if isinstance(due_dt, datetime.datetime) or isinstance(due_dt, datetime.date) else due_dt}" if due_dt else ""
                         # overdue/remaining note
-                        d = overdue_days(p)
+                        d = None
+                        try:
+                            d = overdue_days(p)
+                        except Exception:
+                            d = None
                         if d is None:
                             note = ""
                             sym = "🟡"
@@ -905,23 +935,34 @@ def webhook():
                         visible_tasks.append(p)
                     except Exception as e:
                         print("[ERROR] formatting /check task line:", e)
+                        traceback.print_exc()
                         continue
 
                 # cache LAST_TASKS for /done (only tasks we showed)
                 try:
-                    global LAST_TASKS
                     LAST_TASKS = [p.get("id") for p in visible_tasks if p and isinstance(p, dict)]
-                except Exception:
+                    print("[DBG] /check LAST_TASKS set:", LAST_TASKS)
+                except Exception as e:
+                    print("[WARN] setting LAST_TASKS failed:", e)
+                    traceback.print_exc()
                     LAST_TASKS = []
 
                 # send message
-                send_telegram("\n".join(lines))
+                try:
+                    send_telegram("\n".join(lines))
+                except Exception as e:
+                    print("[ERROR] send_telegram in /check failed:", e)
+                    traceback.print_exc()
+                    # still respond OK to webhook caller
                 return jsonify({"ok": True}), 200
 
             except Exception as e:
+                # print full traceback so we can see the root cause in logs
                 print("Error handling /check:", e)
+                traceback.print_exc()
                 send_telegram("❌ Lỗi khi lấy danh sách nhiệm vụ. Vui lòng thử lại sau.")
                 return jsonify({"ok": True}), 200
+
 
         # /done
         elif cmd.lower().startswith("/done."):
@@ -1028,7 +1069,6 @@ def print_db_schema_once(db_id, label="DB"):
         print("[DEBUG] print_db_schema_once error:", e)
 # secure manual trigger endpoints for weekly/monthly reports
 # place this near other Flask route definitions
-
 MANUAL_TRIGGER_SECRET = os.getenv("MANUAL_TRIGGER_SECRET", "").strip()  # set in env to protect endpoints
 
 @app.route("/debug/run_weekly", methods=["POST", "GET"])
