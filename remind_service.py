@@ -451,7 +451,7 @@ def job_daily():
     today = now.date()
     start_week, end_week = week_range(today)
 
-    # Query tasks: not done & due this week or before today
+    # Query tasks: not done & due this week or before today (for the "hằng ngày" header)
     filters = [
         {"property": PROP_DONE, "checkbox": {"equals": False}},
         {"or": [
@@ -459,29 +459,48 @@ def job_daily():
             {"property": PROP_DUE, "date": {"before": today.isoformat()}}
         ]}
     ]
+    # Only add active filter if PROP_ACTIVE configured and non-empty
     if PROP_ACTIVE:
         filters.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
 
-    tasks = notion_query(REMIND_DB, {"and": filters})
+    try:
+        tasks = notion_query(REMIND_DB, {"and": filters})
+    except Exception as e:
+        print("[WARN] job_daily: notion_query REMIND_DB failed:", e)
+        tasks = []
+
     weekly_tasks = []
     for p in tasks:
-        # include tasks from filter; if you want only "Hằng ngày" add check on PROP_TYPE
         weekly_tasks.append(p)
 
     # Build message header and task lines
     lines = [f"🔔 <b>Hôm nay {today.strftime('%d/%m/%Y')} sếp có {len(weekly_tasks)} nhiệm vụ hằng ngày</b>", ""]
     for i, p in enumerate(weekly_tasks, start=1):
-        lines.append(format_task_line(i, p))
+        try:
+            lines.append(format_task_line(i, p))
+        except Exception:
+            # fallback safe formatting
+            lines.append(f"{i} {get_title(p)}")
 
-    # Goals: display goals with due tasks and progress/countdown
+    # Goals: display goals and related tasks (show goal if it has any related tasks)
     goal_lines = []
     total_goal_tasks_due = 0
     if GOALS_DB:
-        goals = notion_query(GOALS_DB)
+        try:
+            goals = notion_query(GOALS_DB)
+        except Exception as e:
+            print("[WARN] job_daily: notion_query GOALS_DB failed:", e)
+            goals = []
+
         for g in goals:
-            ginfo = read_goal_properties(g)
-            # countdown text preference
-            if ginfo.get("dem_nguoc_formula"):
+            try:
+                ginfo = read_goal_properties(g)
+            except Exception as e:
+                print("[WARN] job_daily: read_goal_properties failed for goal:", g.get("id"), e)
+                ginfo = {}
+
+            # countdown text
+            if ginfo.get("dem_nguoc_formula") is not None:
                 countdown_text = str(ginfo["dem_nguoc_formula"])
             elif ginfo.get("days_remaining_computed") is not None:
                 d = ginfo["days_remaining_computed"]
@@ -494,7 +513,7 @@ def job_daily():
             else:
                 countdown_text = "không có thông tin ngày hoàn thành"
 
-            # progress: prefer formula, else compute from rollups
+            # compute progress percent
             pct = None
             done = None; total = None
             if ginfo.get("tien_do_formula") is not None:
@@ -510,30 +529,67 @@ def job_daily():
                 except:
                     pct = 0
 
-            # related tasks due/overdue
-            related_tasks = notion_query(REMIND_DB, {"filter": {"property": PROP_REL_GOAL, "relation": {"contains": g.get("id")}}}) if PROP_REL_GOAL else []
-            relevant = []
+            # fetch related tasks (all related tasks)
+            related_tasks = []
+            if PROP_REL_GOAL:
+                try:
+                    # fetch without additional date filter - we will decide display logic locally
+                    related_tasks = notion_query(REMIND_DB, {"filter": {"property": PROP_REL_GOAL, "relation": {"contains": g.get("id")}}, "page_size": 100})
+                except Exception as e:
+                    print("[WARN] job_daily: failed to query related tasks for goal", g.get("id"), e)
+                    related_tasks = []
+
+            # Determine which related tasks count as due/overdue (for summary)
+            due_or_overdue = []
             for p in related_tasks:
-                d = overdue_days(p)
+                try:
+                    d = overdue_days(p)  # None if no due date, positive if overdue, 0 today, negative in future
+                except Exception:
+                    d = None
                 if d is not None and d >= 0:
-                    relevant.append((p, d))
-            if relevant:
-                total_goal_tasks_due += len(relevant)
-                goal_lines.append(f"🔗 Mục tiêu: <b>{ginfo['title']}</b> — {countdown_text}")
-                # progress line with bar
+                    due_or_overdue.append((p, d))
+
+            # Show the goal if there is ANY related task
+            if related_tasks:
+                total_goal_tasks_due += len(due_or_overdue)  # summary counts only due/today/overdue
+                goal_lines.append(f"🔗 Mục tiêu: <b>{ginfo.get('title') or '(no title)'}</b> — {countdown_text}")
                 if pct is not None:
-                    bar = render_progress_bar(pct)
+                    try:
+                        bar = render_progress_bar(int(pct))
+                    except Exception:
+                        bar = ""
                     if done is not None and total is not None:
                         goal_lines.append(f"   → Tiến độ: {pct}% ({done}/{total}) {bar}")
                     else:
                         goal_lines.append(f"   → Tiến độ: {pct}% {bar}")
                 else:
                     goal_lines.append(f"   → Tiến độ: không có dữ liệu")
-                for p, d in relevant:
-                    t = get_title(p)
+
+                # list ALL related tasks with state
+                for p in related_tasks:
+                    try:
+                        t = get_title(p)
+                    except:
+                        t = p.get("id", "(no title)")
                     pri = get_select_name(p, PROP_PRIORITY) or ""
-                    note = f"↳🔴Đã trễ {d} ngày, làm ngay đi sếp ơi!" if d>0 else "↳💥Làm Ngay Hôm nay!"
-                    sym = "🔴" if d>0 else "🟡"
+                    d = None
+                    try:
+                        d = overdue_days(p)
+                    except:
+                        d = None
+                    if d is None:
+                        note = "↳Chưa có hạn"
+                        sym = "🟡"
+                    else:
+                        if d > 0:
+                            note = f"↳🔴Đã trễ {d} ngày, làm ngay đi sếp ơi!"
+                            sym = "🔴"
+                        elif d == 0:
+                            note = "↳💥Làm Ngay Hôm nay!"
+                            sym = "🟡"
+                        else:
+                            note = f"↳Còn {abs(d)} ngày nữa"
+                            sym = "🟢"
                     goal_lines.append(f"   - {sym} {t} — Cấp độ: {pri}\n     {note}")
 
     if total_goal_tasks_due:
@@ -547,6 +603,7 @@ def job_daily():
     global LAST_TASKS
     LAST_TASKS = [p.get("id") for p in weekly_tasks]
 
+
 def job_weekly():
     now = datetime.datetime.now(TZ).date()
     start_week, end_week = week_range(now)
@@ -556,7 +613,12 @@ def job_weekly():
         {"property": PROP_DONE, "checkbox": {"equals": True}},
         {"property": PROP_COMPLETED, "date": {"on_or_after": start_week.isoformat(), "on_or_before": end_week.isoformat()}}
     ]
-    done_this_week = notion_query(REMIND_DB, {"and": filters})
+    try:
+        done_this_week = notion_query(REMIND_DB, {"and": filters})
+    except Exception as e:
+        print("[WARN] job_weekly: notion_query done_this_week failed:", e)
+        done_this_week = []
+
     daily_done = sum(1 for p in done_this_week if "hằng" in (get_select_name(p, PROP_TYPE).lower() if get_select_name(p, PROP_TYPE) else ""))
     overdue_done = 0
     for p in done_this_week:
@@ -572,15 +634,27 @@ def job_weekly():
     ]
     if PROP_ACTIVE:
         filters2.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
-    q2 = notion_query(REMIND_DB, {"and": filters2})
+    try:
+        q2 = notion_query(REMIND_DB, {"and": filters2})
+    except Exception as e:
+        print("[WARN] job_weekly: notion_query overdue_remaining failed:", e)
+        q2 = []
     overdue_remaining = len(q2)
 
     # Goals summary (uses rollups/formula if exist)
     goals_summary = []
     if GOALS_DB:
-        goals = notion_query(GOALS_DB)
+        try:
+            goals = notion_query(GOALS_DB)
+        except Exception as e:
+            print("[WARN] job_weekly: notion_query GOALS_DB failed:", e)
+            goals = []
         for g in goals:
-            ginfo = read_goal_properties(g)
+            try:
+                ginfo = read_goal_properties(g)
+            except Exception as e:
+                print("[WARN] job_weekly: read_goal_properties failed for goal:", g.get("id"), e)
+                ginfo = {}
             total = ginfo.get("tong_nhiem_vu_rollup")
             done_total = ginfo.get("nhiem_vu_da_hoan_rollup")
             weekly_done = ginfo.get("nhiem_vu_hoan_tuan_rollup")
@@ -592,11 +666,17 @@ def job_weekly():
                     progress_pct = None
             elif total is not None and done_total is not None:
                 try:
-                    progress_pct = round(done_total / total * 100) if total and total>0 else 0
+                    progress_pct = round(done_total / total * 100) if total and total > 0 else 0
                 except:
                     progress_pct = 0
             if total is not None:
-                goals_summary.append({"name": ginfo["title"], "progress": progress_pct or 0, "done": done_total or 0, "total": total or 0, "weekly_done": weekly_done or 0})
+                goals_summary.append({
+                    "name": ginfo.get("title") or "(no title)",
+                    "progress": progress_pct or 0,
+                    "done": done_total or 0,
+                    "total": total or 0,
+                    "weekly_done": weekly_done or 0
+                })
 
     # Build weekly message
     lines = [f"📊 <b>Báo cáo tuần — {datetime.datetime.now(TZ).date().strftime('%d/%m/%Y')}</b>", ""]
@@ -607,7 +687,10 @@ def job_weekly():
     lines.append("")
     lines.append("🎯 <b>Mục tiêu nổi bật</b>")
     for g in sorted(goals_summary, key=lambda x: -x['progress'])[:6]:
-        bar = render_progress_bar(g['progress'])
+        try:
+            bar = render_progress_bar(g['progress'])
+        except:
+            bar = ""
         lines.append(f"• {g['name']}")
         lines.append(f"  → Tiến độ: {g['progress']}% ({g['done']}/{g['total']}) {bar}")
         lines.append(f"  → Nhiệm vụ hoàn thành tuần này: {g['weekly_done']}")
@@ -616,6 +699,7 @@ def job_weekly():
     lines.append("Sếp đang tiến rất tốt! hãy lăn quả cùa tuyết này để tiến tới hoàn thành mục tiêu lớn. 🎯 Tuần sau bứt phá thêm nhé! 🔥🔥🔥")
     send_telegram("\n".join(lines))
 
+
 def job_monthly():
     now = datetime.datetime.now(TZ).date()
     mstart, mend = month_range(now)
@@ -623,13 +707,26 @@ def job_monthly():
         {"property": PROP_DONE, "checkbox": {"equals": True}},
         {"property": PROP_COMPLETED, "date": {"on_or_after": mstart.isoformat(), "on_or_before": mend.isoformat()}}
     ]
-    done_this_month = notion_query(REMIND_DB, {"and": filters})
+    try:
+        done_this_month = notion_query(REMIND_DB, {"and": filters})
+    except Exception as e:
+        print("[WARN] job_monthly: notion_query done_this_month failed:", e)
+        done_this_month = []
+
     daily_month_done = sum(1 for p in done_this_month if "hằng" in (get_select_name(p, PROP_TYPE).lower() if get_select_name(p, PROP_TYPE) else ""))
     goals_summary = []
     if GOALS_DB:
-        goals = notion_query(GOALS_DB)
+        try:
+            goals = notion_query(GOALS_DB)
+        except Exception as e:
+            print("[WARN] job_monthly: notion_query GOALS_DB failed:", e)
+            goals = []
         for g in goals:
-            ginfo = read_goal_properties(g)
+            try:
+                ginfo = read_goal_properties(g)
+            except Exception as e:
+                print("[WARN] job_monthly: read_goal_properties failed for goal:", g.get("id"), e)
+                ginfo = {}
             total = ginfo.get("tong_nhiem_vu_rollup")
             done = ginfo.get("nhiem_vu_da_hoan_rollup")
             progress_pct = None
@@ -644,13 +741,16 @@ def job_monthly():
                 except:
                     progress_pct = 0
             if total is not None:
-                goals_summary.append({"name": ginfo["title"], "progress": progress_pct or 0, "done": done or 0, "total": total or 0})
+                goals_summary.append({"name": ginfo.get("title") or "(no title)", "progress": progress_pct or 0, "done": done or 0, "total": total or 0})
     lines = [f"📅 <b>Báo cáo tháng {now.strftime('%m/%Y')}</b>", ""]
     lines.append(f"• ✔ Việc hằng ngày hoàn thành tháng: {daily_month_done}")
     lines.append("")
     lines.append("🎯 Tiến độ mục tiêu chính:")
     for g in sorted(goals_summary, key=lambda x: -x['progress'])[:6]:
-        bar = render_progress_bar(g['progress'])
+        try:
+            bar = render_progress_bar(g['progress'])
+        except:
+            bar = ""
         lines.append(f"• {g['name']} → {g['progress']}% ({g['done']}/{g['total']}) {bar}")
     send_telegram("\n".join(lines))
 
