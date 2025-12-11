@@ -1,13 +1,75 @@
-name: Daily Ping Remind Service
+name: Weekly & Monthly Ping Remind Service
 
 on:
   schedule:
-    - cron: "0 7 * * *"     # 14:00 giờ Việt Nam
-  workflow_dispatch: {}
+    # Weekly: Chủ nhật 19:55 VN = Chủ nhật 12:55 UTC
+    - cron: "55 12 * * 0"
+    # Daily at 07:55 VN = 00:55 UTC -> dùng để phát hiện ngày cuối tháng
+    - cron: "55 0 * * *"
+  workflow_dispatch: {} # cho phép chạy tay để test
+
+env:
+  BASE_URL: "https://remind-service.onrender.com"  # đổi nếu cần
+  WEEKLY_PATH: "/report/weekly"   # endpoint báo cáo tuần (thay nếu khác)
+  MONTHLY_PATH: "/report/monthly" # endpoint báo cáo tháng (thay nếu khác)
+  CURL_OPTS: "--max-time 30 -sS -w '\\nHTTP_CODE:%{http_code}\\n'"
 
 jobs:
-  ping:
+  weekly_ping:
+    name: Weekly report (Sunday 19:55 VN)
     runs-on: ubuntu-latest
     steps:
-      - name: Ping remind-service /health
-        run: curl -v --max-time 20 https://remind-service.onrender.com/health
+      - name: Check if this run is the intended weekly time (UTC Sunday)
+        run: |
+          # date -u +%u => 1..7 (Mon..Sun). Sunday = 7
+          DOW=$(date -u +%u)
+          echo "UTC day-of-week: $DOW (1=Mon ... 7=Sun)"
+          if [ "$DOW" -ne 7 ]; then
+            echo "Not Sunday (UTC). Skipping weekly ping."
+            exit 0
+          fi
+          echo "It's Sunday UTC — proceed to weekly ping."
+      - name: Ping weekly endpoint
+        run: |
+          url="${BASE_URL}${WEEKLY_PATH}"
+          echo "Pinging weekly URL: $url"
+          # Verbose curl output + HTTP code printed
+          resp=$(curl $CURL_OPTS "$url" 2>&1) || true
+          echo "$resp"
+          # Fail job if HTTP code not 2xx
+          http_code=$(echo "$resp" | tr '\n' ' ' | sed -n 's/.*HTTP_CODE:\([0-9]\{3\}\).*/\1/p')
+          echo "HTTP code: $http_code"
+          if ! echo "$http_code" | grep -E '^2[0-9][0-9]$' >/dev/null; then
+            echo "Weekly ping failed (HTTP $http_code)"
+            exit 1
+          fi
+          echo "Weekly ping succeeded."
+
+  monthly_ping:
+    name: Monthly report (last day 07:55 VN)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if today is last day of month (UTC)
+        run: |
+          # We run daily at 00:55 UTC (which is 07:55 VN). Determine if today is the last day of month.
+          # If tomorrow's day is 01, then today is last day.
+          TOMORROW_DAY=$(date -u -d "tomorrow" +%d)
+          echo "Tomorrow (UTC) day-of-month = $TOMORROW_DAY"
+          if [ "$TOMORROW_DAY" != "01" ]; then
+            echo "Not last day of month (UTC). Skipping monthly ping."
+            exit 0
+          fi
+          echo "Today is last day of month (UTC) — proceed to monthly ping."
+      - name: Ping monthly endpoint
+        run: |
+          url="${BASE_URL}${MONTHLY_PATH}"
+          echo "Pinging monthly URL: $url"
+          resp=$(curl $CURL_OPTS "$url" 2>&1) || true
+          echo "$resp"
+          http_code=$(echo "$resp" | tr '\n' ' ' | sed -n 's/.*HTTP_CODE:\([0-9]\{3\}\).*/\1/p')
+          echo "HTTP code: $http_code"
+          if ! echo "$http_code" | grep -E '^2[0-9][0-9]$' >/dev/null; then
+            echo "Monthly ping failed (HTTP $http_code)"
+            exit 1
+          fi
+          echo "Monthly ping succeeded."
