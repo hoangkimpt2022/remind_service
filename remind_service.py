@@ -916,7 +916,36 @@ def webhook():
         print("Unhandled exception in webhook:", e)
         send_telegram("❌ Lỗi nội bộ khi xử lý lệnh. Vui lòng thử lại sau.")
         return jsonify({"ok": True}), 200
+# secure manual trigger endpoints for weekly/monthly reports
+# place this near other Flask route definitions
 
+MANUAL_TRIGGER_SECRET = os.getenv("MANUAL_TRIGGER_SECRET", "").strip()  # set in env to protect endpoints
+
+@app.route("/debug/run_weekly", methods=["POST", "GET"])
+def debug_run_weekly():
+    # security: require secret if provided
+    if MANUAL_TRIGGER_SECRET:
+        token = request.args.get("token", "") or request.headers.get("X-Run-Token", "")
+        if token != MANUAL_TRIGGER_SECRET:
+            return jsonify({"error": "forbidden"}), 403
+    try:
+        job_weekly()
+        return jsonify({"ok": True, "msg": "job_weekly executed"}), 200
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route("/debug/run_monthly", methods=["POST", "GET"])
+def debug_run_monthly():
+    if MANUAL_TRIGGER_SECRET:
+        token = request.args.get("token", "") or request.headers.get("X-Run-Token", "")
+        if token != MANUAL_TRIGGER_SECRET:
+            return jsonify({"error": "forbidden"}), 403
+    try:
+        job_monthly()
+        return jsonify({"ok": True, "msg": "job_monthly executed"}), 200
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+        
 @app.route("/debug/schema", methods=["GET"])
 def debug_schema():
     if not REMIND_DB:
@@ -1024,4 +1053,5 @@ if __name__ == "__main__":
         port = int(os.getenv("PORT", 5000))
         print(f"Starting Flask server on port {port} for webhook mode.")
         app.run(host="0.0.0.0", port=port, threaded=True)
+
 
