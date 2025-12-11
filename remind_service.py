@@ -1098,17 +1098,52 @@ def debug_run_monthly():
 
 # ---------------- Scheduler ----------------
 def start_scheduler():
+    from apscheduler.schedulers.background import BackgroundScheduler
     sched = BackgroundScheduler(timezone=TIMEZONE)
-    sched.add_job(job_daily, 'cron', hour=REMIND_HOUR, minute=REMIND_MINUTE, id='daily')
-    sched.add_job(job_weekly, 'cron', day_of_week='sun', hour=WEEKLY_HOUR, minute=0, id='weekly')
+
+    # daily
+    try:
+        if 'job_daily' in globals():
+            sched.add_job(job_daily, 'cron', hour=REMIND_HOUR, minute=REMIND_MINUTE, id='daily')
+        else:
+            print("[WARN] job_daily not defined; skipping daily job.")
+    except Exception as e:
+        print("[ERROR] adding daily job:", e)
+
+    # weekly
+    try:
+        if 'job_weekly' in globals():
+            sched.add_job(job_weekly, 'cron', day_of_week='sun', hour=WEEKLY_HOUR, minute=0, id='weekly')
+        else:
+            print("[WARN] job_weekly not defined; skipping weekly job.")
+    except Exception as e:
+        print("[ERROR] adding weekly job:", e)
+
+    # monthly wrapper
     def monthly_wrapper():
         today = datetime.datetime.now(TZ).date()
         tomorrow = today + datetime.timedelta(days=1)
         if tomorrow.day == 1:
-            job_monthly()
-    sched.add_job(monthly_wrapper, 'cron', hour=MONTHLY_HOUR, minute=0, id='monthly')
-    sched.start()
-    print(f"Scheduler started: daily at {REMIND_HOUR:02d}:{REMIND_MINUTE:02d} ({TIMEZONE})")
+            try:
+                if 'job_monthly' in globals():
+                    job_monthly()
+                else:
+                    print("[WARN] job_monthly not defined; skipping run.")
+            except Exception as e:
+                print("[ERROR] running job_monthly:", e)
+
+    try:
+        sched.add_job(monthly_wrapper, 'cron', hour=MONTHLY_HOUR, minute=0, id='monthly')
+    except Exception as e:
+        print("[ERROR] adding monthly wrapper job:", e)
+
+    try:
+        sched.start()
+        print(f"[INFO] Scheduler started: daily at {REMIND_HOUR:02d}:{REMIND_MINUTE:02d} ({TIMEZONE})")
+    except Exception as e:
+        print("[ERROR] scheduler start failed:", e)
+
+    return sched
 
 def set_telegram_webhook():
     if TELEGRAM_TOKEN and WEBHOOK_URL:
