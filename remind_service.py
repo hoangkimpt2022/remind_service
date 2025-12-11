@@ -659,28 +659,87 @@ def job_daily():
     except Exception:
         LAST_TASKS = []
 
+def _parse_completed_datetime_from_page(page):
+    """
+    Try multiple ways to get completed datetime from a page:
+    1) If PROP_COMPLETED is a date property, get_date_start will return datetime.
+    2) If it's a formula/rollup returning a date-like string, extract_prop_text gives the string -> try parse.
+    Returns datetime or None.
+    """
+    # 1) direct date property
+    dt = get_date_start(page, PROP_COMPLETED)
+    if dt:
+        return dt
+
+    # 2) fallback: extract text from any property (handles formula/rollup string)
+    try:
+        props = page.get("properties", {}) or {}
+        s = extract_prop_text(props, PROP_COMPLETED)
+        if s:
+            # try parse flexible with dateutil
+            try:
+                parsed = dateparser.parse(s)
+                return parsed
+            except Exception:
+                return None
+    except Exception:
+        return None
+    return None
+
+
 def job_weekly():
     now = datetime.datetime.now(TZ).date()
     start_week, end_week = week_range(now)
 
-    filters = [
-        {"property": PROP_DONE, "checkbox": {"equals": True}},
-        {"property": PROP_COMPLETED, "date": {"on_or_after": start_week.isoformat(), "on_or_before": end_week.isoformat()}}
-    ]
-    try:
-        done_this_week = notion_query(REMIND_DB, {"and": filters})
-    except Exception as e:
-        print("[WARN] job_weekly: notion_query done_this_week failed:", e)
-        done_this_week = []
+    # --- Fetch pages that are marked Done (don't filter by completed date at Notion side) ---
+    filters_done = [{"property": PROP_DONE, "checkbox": {"equals": True}}]
+    if PROP_ACTIVE:
+        filters_done.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
 
-    daily_done = sum(1 for p in done_this_week if "hằng" in (get_select_name(p, PROP_TYPE).lower() if get_select_name(p, PROP_TYPE) else ""))
+    try:
+        # note: notion_query accepts {"and": filters} in current wrapper
+        done_pages = notion_query(REMIND_DB, {"and": filters_done})
+    except Exception as e:
+        print("[WARN] job_weekly: notion_query for done_pages failed:", e)
+        done_pages = []
+
+    # Now compute done_this_week by examining completed datetime per page
+    done_this_week = []
+    for p in done_pages:
+        try:
+            comp_dt = _parse_completed_datetime_from_page(p)
+            if comp_dt is None:
+                # nothing to check
+                continue
+            comp_date = comp_dt.date() if isinstance(comp_dt, datetime.datetime) else comp_dt
+            if comp_date >= start_week and comp_date <= end_week:
+                done_this_week.append(p)
+        except Exception as ex:
+            print("[WARN] job_weekly: error parsing completed date for page", p.get("id"), ex)
+            continue
+
+    # daily_done: items completed this week that are 'hằng' type
+    daily_done = 0
+    for p in done_this_week:
+        try:
+            ttype = get_select_name(p, PROP_TYPE) or ""
+            if "hằng" in ttype.lower():
+                daily_done += 1
+        except Exception:
+            continue
+
+    # overdue_done: among done_this_week, count where completed date > due date
     overdue_done = 0
     for p in done_this_week:
-        due = get_date_start(p, PROP_DUE)
-        comp = get_date_start(p, PROP_COMPLETED)
-        if due and comp and comp.date() > due.date():
-            overdue_done += 1
+        try:
+            due = get_date_start(p, PROP_DUE)  # due might be date; get_date_start is OK
+            comp = _parse_completed_datetime_from_page(p)
+            if due and comp and comp.date() > due.date():
+                overdue_done += 1
+        except Exception:
+            continue
 
+    # Overdue not done: tasks not done and due before today (same as before)
     filters2 = [
         {"property": PROP_DONE, "checkbox": {"equals": False}},
         {"property": PROP_DUE, "date": {"before": datetime.datetime.now(TZ).date().isoformat()}}
@@ -689,11 +748,12 @@ def job_weekly():
         filters2.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
     try:
         q2 = notion_query(REMIND_DB, {"and": filters2})
+        overdue_remaining = len(q2)
     except Exception as e:
         print("[WARN] job_weekly: notion_query overdue_remaining failed:", e)
-        q2 = []
-    overdue_remaining = len(q2)
+        overdue_remaining = 0
 
+    # --- Goals summary: unchanged logic but robust to missing values ---
     goals_summary = []
     if GOALS_DB:
         try:
@@ -707,6 +767,7 @@ def job_weekly():
             except Exception as e:
                 print("[WARN] job_weekly: read_goal_properties failed for goal:", g.get("id"), e)
                 ginfo = {}
+
             total = ginfo.get("tong_nhiem_vu_rollup")
             done_total = ginfo.get("nhiem_vu_da_hoan_rollup")
             weekly_done = ginfo.get("nhiem_vu_hoan_tuan_rollup")
@@ -721,15 +782,17 @@ def job_weekly():
                     progress_pct = round(done_total / total * 100) if total and total > 0 else 0
                 except:
                     progress_pct = 0
+
             if total is not None:
                 goals_summary.append({
                     "name": ginfo.get("title") or "(no title)",
-                    "progress": progress_pct or 0,
+                    "progress": int(progress_pct) if progress_pct is not None else 0,
                     "done": done_total or 0,
                     "total": total or 0,
                     "weekly_done": weekly_done or 0
                 })
 
+    # Build weekly message
     lines = [f"📊 <b>Báo cáo tuần — {datetime.datetime.now(TZ).date().strftime('%d/%m/%Y')}</b>", ""]
     lines.append("🔥 <b>Công việc hằng ngày</b>")
     lines.append(f"• ✔ Hoàn thành: {daily_done}")
@@ -738,10 +801,7 @@ def job_weekly():
     lines.append("")
     lines.append("🎯 <b>Mục tiêu nổi bật</b>")
     for g in sorted(goals_summary, key=lambda x: -x['progress'])[:6]:
-        try:
-            bar = render_progress_bar(g['progress'])
-        except:
-            bar = ""
+        bar = render_progress_bar(g['progress'])
         lines.append(f"• {g['name']}")
         lines.append(f"  → Tiến độ: {g['progress']}% ({g['done']}/{g['total']}) {bar}")
         lines.append(f"  → Nhiệm vụ hoàn thành tuần này: {g['weekly_done']}")
@@ -751,23 +811,83 @@ def job_weekly():
     send_telegram("\n".join(lines))
 
 def job_monthly():
-    now = datetime.datetime.now(TZ).date()
-    mstart, mend = month_range(now)
-    filters = [
-        {"property": PROP_DONE, "checkbox": {"equals": True}},
-        {"property": PROP_COMPLETED, "date": {"on_or_after": mstart.isoformat(), "on_or_before": mend.isoformat()}}
-    ]
-    try:
-        done_this_month = notion_query(REMIND_DB, {"and": filters})
-    except Exception as e:
-        print("[WARN] job_monthly: notion_query done_this_month failed:", e)
-        done_this_month = []
+    """
+    Robust monthly report:
+    - Count items completed during current month (using parsed completed datetime).
+    - Count daily items completed in month (type contains 'hằng').
+    - Build goals summary (progress, done/total, monthly_done).
+    - Send Telegram message.
+    """
+    today = datetime.datetime.now(TZ).date()
+    mstart, mend = month_range(today)  # first day and last day (date)
+    print(f"[INFO] job_monthly start for {mstart} -> {mend}")
 
-    daily_month_done = sum(1 for p in done_this_month if "hằng" in (get_select_name(p, PROP_TYPE).lower() if get_select_name(p, PROP_TYPE) else ""))
+    # Fetch pages marked Done (don't filter by completed date on Notion side)
+    filters_done = [{"property": PROP_DONE, "checkbox": {"equals": True}}]
+    if PROP_ACTIVE:
+        filters_done.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
+
+    try:
+        done_pages = notion_query(REMIND_DB, {"and": filters_done})
+        print(f"[DBG] job_monthly: fetched {len(done_pages)} done pages")
+    except Exception as e:
+        print("[WARN] job_monthly: notion_query for done_pages failed:", e)
+        done_pages = []
+
+    # compute done_this_month by parsing completed datetime
+    done_this_month = []
+    for p in done_pages:
+        try:
+            comp_dt = _parse_completed_datetime_from_page(p)
+            if comp_dt is None:
+                continue
+            comp_date = comp_dt.date() if isinstance(comp_dt, datetime.datetime) else comp_dt
+            if comp_date >= mstart and comp_date <= mend:
+                done_this_month.append((p, comp_date))
+        except Exception as ex:
+            print("[WARN] job_monthly: error parsing completed date for page", p.get("id"), ex)
+            continue
+
+    # total daily items completed in month (type contains 'hằng')
+    daily_month_done = 0
+    for p, comp_date in done_this_month:
+        try:
+            ttype = get_select_name(p, PROP_TYPE) or ""
+            if "hằng" in ttype.lower():
+                daily_month_done += 1
+        except Exception:
+            continue
+
+    # overdue_done: among done_this_month, count where completed date > due date
+    overdue_done = 0
+    for p, comp_date in done_this_month:
+        try:
+            due = get_date_start(p, PROP_DUE)
+            if due and comp_date and comp_date > due.date():
+                overdue_done += 1
+        except Exception:
+            continue
+
+    # Overdue not done: tasks not done and due before today (same as weekly)
+    filters_overdue = [
+        {"property": PROP_DONE, "checkbox": {"equals": False}},
+        {"property": PROP_DUE, "date": {"before": datetime.datetime.now(TZ).date().isoformat()}}
+    ]
+    if PROP_ACTIVE:
+        filters_overdue.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
+    try:
+        q_overdue = notion_query(REMIND_DB, {"and": filters_overdue})
+        overdue_remaining = len(q_overdue)
+    except Exception as e:
+        print("[WARN] job_monthly: notion_query overdue_remaining failed:", e)
+        overdue_remaining = 0
+
+    # Goals summary: use read_goal_properties; include monthly rollup if present
     goals_summary = []
     if GOALS_DB:
         try:
             goals = notion_query(GOALS_DB)
+            print(f"[DBG] job_monthly: fetched {len(goals)} goals")
         except Exception as e:
             print("[WARN] job_monthly: notion_query GOALS_DB failed:", e)
             goals = []
@@ -777,32 +897,61 @@ def job_monthly():
             except Exception as e:
                 print("[WARN] job_monthly: read_goal_properties failed for goal:", g.get("id"), e)
                 ginfo = {}
+
             total = ginfo.get("tong_nhiem_vu_rollup")
-            done = ginfo.get("nhiem_vu_da_hoan_rollup")
-            progress_pct = None
-            if ginfo.get("tien_do_formula") is not None:
-                try:
-                    progress_pct = int(float(ginfo["tien_do_formula"]))
-                except:
-                    progress_pct = None
-            elif total is not None and done is not None:
-                try:
-                    progress_pct = round(done / total * 100) if total and total>0 else 0
-                except:
-                    progress_pct = 0
-            if total is not None:
-                goals_summary.append({"name": ginfo.get("title") or "(no title)", "progress": progress_pct or 0, "done": done or 0, "total": total or 0})
-    lines = [f"📅 <b>Báo cáo tháng {now.strftime('%m/%Y')}</b>", ""]
+            done_total = ginfo.get("nhiem_vu_da_hoan_rollup")
+            monthly_done = ginfo.get("nhiem_vu_hoan_thang_rollup") or 0
+
+            # compute progress_pct using normalized field if present
+            progress_pct = ginfo.get("progress_pct")
+            if progress_pct is None:
+                # fallback to formula raw or rollups
+                raw = ginfo.get("tien_do_formula")
+                if raw is not None:
+                    try:
+                        rp = str(raw).strip()
+                        if rp.endswith("%"):
+                            rp = rp[:-1].strip()
+                        val = float(rp)
+                        if val <= 1:
+                            val = val * 100
+                        progress_pct = int(round(val))
+                    except:
+                        progress_pct = None
+                elif total and done_total is not None:
+                    try:
+                        progress_pct = int(round(float(done_total) / float(total) * 100)) if total and total > 0 else 0
+                    except:
+                        progress_pct = None
+
+            # ensure ints
+            gs = {
+                "name": ginfo.get("title") or "(no title)",
+                "progress": int(progress_pct) if progress_pct is not None else 0,
+                "done": done_total or 0,
+                "total": total or 0,
+                "monthly_done": monthly_done or 0
+            }
+            goals_summary.append(gs)
+
+    # Build monthly message
+    lines = [f"📅 <b>Báo cáo tháng {today.strftime('%m/%Y')}</b>", ""]
     lines.append(f"• ✔ Việc hằng ngày hoàn thành tháng: {daily_month_done}")
+    lines.append(f"• ⏳ Quá hạn đã hoàn thành: {overdue_done}")
+    lines.append(f"• 🆘 Quá hạn chưa làm: {overdue_remaining}")
     lines.append("")
     lines.append("🎯 Tiến độ mục tiêu chính:")
-    for g in sorted(goals_summary, key=lambda x: -x['progress'])[:6]:
-        try:
-            bar = render_progress_bar(g['progress'])
-        except:
-            bar = ""
+    # sort by progress desc
+    for g in sorted(goals_summary, key=lambda x: -x['progress'])[:8]:
+        bar = render_progress_bar(g['progress'])
         lines.append(f"• {g['name']} → {g['progress']}% ({g['done']}/{g['total']}) {bar}")
-    send_telegram("\n".join(lines))
+        lines.append(f"  → Nhiệm vụ hoàn thành tháng này: {g['monthly_done']}")
+    lines.append("")
+    lines.append("📈 <b>Tổng quan</b>")
+    lines.append("Sếp đang tiến rất tốt! Hãy lăn quả tuyết này để tiến tới hoàn thành mục tiêu lớn. 🎯 Tháng sau bứt phá thêm nhé! 🔥🔥🔥")
+
+    send_telegram("\n".join(lines).strip())
+    print(f"[INFO] job_monthly sent: daily_done={daily_month_done}, done_this_month={len(done_this_month)}, goals={len(goals_summary)}")
 
 # ---------------- Telegram webhook handlers ----------------
 @app.route("/webhook", methods=["POST"])
@@ -916,6 +1065,35 @@ def webhook():
         print("Unhandled exception in webhook:", e)
         send_telegram("❌ Lỗi nội bộ khi xử lý lệnh. Vui lòng thử lại sau.")
         return jsonify({"ok": True}), 200
+
+@app.route("/debug/schema", methods=["GET"])
+def debug_schema():
+    if not REMIND_DB:
+        return jsonify({"error": "REMIND_NOTION_DATABASE not set"}), 400
+    try:
+        db = req_get(f"/databases/{REMIND_DB}")
+        return jsonify({"database_id": REMIND_DB, "properties": db.get("properties", {})})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/health", methods=["GET"])
+def health():
+    return "OK", 200
+
+# ---------------- Schema debug helper (print at startup) ----------------
+def print_db_schema_once(db_id, label="DB"):
+    try:
+        r = requests.get(f"https://api.notion.com/v1/databases/{db_id}", headers=HEADERS, timeout=10)
+        if r.status_code != 200:
+            print(f"[DEBUG] GET /databases/{db_id} returned {r.status_code}: {r.text[:1000]}")
+            return
+        schema = r.json()
+        props = schema.get("properties", {})
+        print(f"[DEBUG] {label} properties keys ({len(props)}):")
+        for k, v in props.items():
+            print("  -", k, "(", v.get("type"), ")")
+    except Exception as e:
+        print("[DEBUG] print_db_schema_once error:", e)
 # secure manual trigger endpoints for weekly/monthly reports
 # place this near other Flask route definitions
 
@@ -945,35 +1123,6 @@ def debug_run_monthly():
         return jsonify({"ok": True, "msg": "job_monthly executed"}), 200
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
-        
-@app.route("/debug/schema", methods=["GET"])
-def debug_schema():
-    if not REMIND_DB:
-        return jsonify({"error": "REMIND_NOTION_DATABASE not set"}), 400
-    try:
-        db = req_get(f"/databases/{REMIND_DB}")
-        return jsonify({"database_id": REMIND_DB, "properties": db.get("properties", {})})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/health", methods=["GET"])
-def health():
-    return "OK", 200
-
-# ---------------- Schema debug helper (print at startup) ----------------
-def print_db_schema_once(db_id, label="DB"):
-    try:
-        r = requests.get(f"https://api.notion.com/v1/databases/{db_id}", headers=HEADERS, timeout=10)
-        if r.status_code != 200:
-            print(f"[DEBUG] GET /databases/{db_id} returned {r.status_code}: {r.text[:1000]}")
-            return
-        schema = r.json()
-        props = schema.get("properties", {})
-        print(f"[DEBUG] {label} properties keys ({len(props)}):")
-        for k, v in props.items():
-            print("  -", k, "(", v.get("type"), ")")
-    except Exception as e:
-        print("[DEBUG] print_db_schema_once error:", e)
 
 # ---------------- Scheduler ----------------
 def start_scheduler():
@@ -1053,5 +1202,4 @@ if __name__ == "__main__":
         port = int(os.getenv("PORT", 5000))
         print(f"Starting Flask server on port {port} for webhook mode.")
         app.run(host="0.0.0.0", port=port, threaded=True)
-
 
