@@ -1,0 +1,13 @@
+name: Daily Ping Remind Service
+
+on:
+  schedule:
+    - cron: "55 18 * * *"   # chạy 01:55 giờ VN (UTC+7)
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Curl ping
+        run: curl -v --max-time 20 https://remind-service.onrender.com
