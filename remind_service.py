@@ -686,125 +686,6 @@ def _parse_completed_datetime_from_page(page):
         return None
     return None
 
-
-def job_weekly():
-    now = datetime.datetime.now(TZ).date()
-    start_week, end_week = week_range(now)
-
-    # Fetch DONE items for this week (not filter in Notion because date may be formula)
-    filters = [
-        {"property": PROP_DONE, "checkbox": {"equals": True}}
-    ]
-    if PROP_ACTIVE:
-        filters.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
-
-    try:
-        done_pages = notion_query(REMIND_DB, {"and": filters})
-    except:
-        done_pages = []
-
-    done_this_week = []
-    daily_done = 0
-    overdue_done = 0
-
-    for p in done_pages:
-        comp_dt = _parse_completed_datetime_from_page(p)
-        if not comp_dt:
-            continue
-        comp_date = comp_dt.date()
-
-        if start_week <= comp_date <= end_week:
-            done_this_week.append(p)
-
-            # count daily done
-            ttype = get_select_name(p, PROP_TYPE) or ""
-            if "hằng" in ttype.lower():
-                daily_done += 1
-
-            # overdue? (completed after due date)
-            due = get_date_start(p, PROP_DUE)
-            if due and comp_date > due.date():
-                overdue_done += 1
-
-    # Overdue not done
-    filters2 = [
-        {"property": PROP_DONE, "checkbox": {"equals": False}},
-        {"property": PROP_DUE, "date": {"before": now.isoformat()}}
-    ]
-    if PROP_ACTIVE:
-        filters2.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
-    try:
-        overdue_remaining = len(notion_query(REMIND_DB, {"and": filters2}))
-    except:
-        overdue_remaining = 0
-
-    # ---- GOALS SUMMARY ----
-    goals_summary = []
-    if GOALS_DB:
-        try:
-            goals = notion_query(GOALS_DB)
-        except:
-            goals = []
-
-        for g in goals:
-            ginfo = read_goal_properties(g)
-
-            total = ginfo.get("tong_nhiem_vu_rollup") or 0
-            done_total = ginfo.get("nhiem_vu_da_hoan_rollup") or 0
-            weekly_done = ginfo.get("nhiem_vu_hoan_tuan_rollup") or 0
-
-            # FIX TIẾN ĐỘ: ưu tiên progress_pct từ read_goal_properties
-            progress_pct = ginfo.get("progress_pct")
-
-            # fallback nếu vẫn None
-            if progress_pct is None:
-                raw = ginfo.get("tien_do_formula")
-                if raw is not None:
-                    try:
-                        rp = str(raw).strip().replace("%", "")
-                        val = float(rp)
-                        if val <= 1:
-                            val = val * 100
-                        progress_pct = int(round(val))
-                    except:
-                        progress_pct = None
-
-            if progress_pct is None:
-                try:
-                    progress_pct = int(round(done_total / total * 100)) if total else 0
-                except:
-                    progress_pct = 0
-
-            goals_summary.append({
-                "name": ginfo.get("title"),
-                "progress": progress_pct,
-                "done": done_total,
-                "total": total,
-                "weekly_done": weekly_done
-            })
-
-    # ---- BUILD MESSAGE ----
-    lines = [f"📊 <b>Báo cáo tuần — {now.strftime('%d/%m/%Y')}</b>", ""]
-    lines.append("🔥 <b>Công việc hằng ngày</b>")
-    lines.append(f"• ✔ Hoàn thành: {daily_done}")
-    lines.append(f"• ⏳ Quá hạn đã hoàn thành: {overdue_done}")
-    lines.append(f"• 🆘 Quá hạn chưa làm: {overdue_remaining}")
-    lines.append("")
-    lines.append("🎯 <b>Mục tiêu nổi bật</b>")
-
-    # Sort by progress descending
-    for g in sorted(goals_summary, key=lambda x: -x['progress'])[:6]:
-        bar = render_progress_bar(g['progress'])
-        lines.append(f"• {g['name']}")
-        lines.append(f"  → Tiến độ: {g['progress']}% ({g['done']}/{g['total']}) {bar}")
-        lines.append(f"  → Nhiệm vụ hoàn thành tuần này: {g['weekly_done']}")
-
-    lines.append("")
-    lines.append("📈 <b>Tổng quan</b>")
-    lines.append("Sếp đang tiến rất tốt! hãy lăn quả cùa tuyết này để tiến tới hoàn thành mục tiêu lớn. 🎯 Tuần sau bứt phá thêm nhé! 🔥🔥🔥")
-
-    send_telegram("\n".join(lines))
-
 def job_monthly():
     """
     Robust monthly report:
@@ -962,30 +843,86 @@ def webhook():
         if not text.startswith("/"):
             return jsonify({"ok": True}), 200
         cmd = text.strip()
-        # /check
-        if cmd.lower() == "/check":
-            now = datetime.datetime.now(TZ).date()
-            start_week, end_week = week_range(now)
-            filters = [
-                {"property": PROP_DONE, "checkbox": {"equals": False}},
-                {"or": [
-                    {"property": PROP_DUE, "date": {"on_or_after": start_week.isoformat(), "on_or_before": end_week.isoformat()}},
-                    {"property": PROP_DUE, "date": {"before": now.isoformat()}}
-                ]}
-            ]
-            if PROP_ACTIVE:
-                filters.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
-            tasks = notion_query(REMIND_DB, {"and": filters})
-            if not tasks:
-                LAST_TASKS = []
-                send_telegram("🎉 Không có nhiệm vụ trong tuần này hoặc quá hạn để hiển thị.")
+        # /check : show tasks for this week (and overdue)
+        if text.lower() == "/check":
+            try:
+                now = datetime.datetime.now(TZ).date()
+                start_week, end_week = week_range(now)
+
+                # Build filters: not Done, due this week OR before today (overdue)
+                filters = [
+                    {"property": PROP_DONE, "checkbox": {"equals": False}},
+                    {"or": [
+                        {"property": PROP_DUE, "date": {"on_or_after": start_week.isoformat(), "on_or_before": end_week.isoformat()}},
+                        {"property": PROP_DUE, "date": {"before": now.isoformat()}}
+                    ]}
+                ]
+                if PROP_ACTIVE:
+                    filters.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
+
+                tasks = notion_query(REMIND_DB, {"and": filters}) or []
+
+                # If no tasks, respond early
+                if not tasks:
+                    send_telegram("🎉 Không có nhiệm vụ trong tuần này hoặc quá hạn để hiển thị.")
+                    return jsonify({"ok": True}), 200
+
+                # Build header: show week range
+                lines = [f"🔔 <b>Danh sách nhiệm vụ tuần {start_week.strftime('%d/%m')} - {end_week.strftime('%d/%m')}</b>", ""]
+
+                # For each task, format a line including due datetime and priority; skip any tasks that somehow are marked done
+                visible_tasks = []
+                for i, p in enumerate(tasks, start=1):
+                    try:
+                        # defensive: ensure dict
+                        if not p or not isinstance(p, dict):
+                            continue
+                        # skip if page is marked done (double-check)
+                        if get_checkbox(p, PROP_DONE):
+                            continue
+                        title = get_title(p)
+                        pri = get_select_name(p, PROP_PRIORITY) or ""
+                        # due date/time
+                        due_dt = get_date_start(p, PROP_DUE)
+                        due_text = f" — hạn: {format_dt(due_dt)}" if due_dt else ""
+                        # overdue/remaining note
+                        d = overdue_days(p)
+                        if d is None:
+                            note = ""
+                            sym = "🟡"
+                        else:
+                            if d > 0:
+                                sym = "🔴"
+                                note = f"↳ Đã trễ {d} ngày, làm ngay đi sếp ơi!"
+                            elif d == 0:
+                                sym = "🟡"
+                                note = "↳💥Làm Ngay Hôm nay!"
+                            else:
+                                sym = "🟢"
+                                note = f"↳Còn {abs(d)} ngày nữa"
+                        # append formatted line
+                        lines.append(f"{len(visible_tasks)+1} {sym} <b>{title}</b> — Cấp độ: {pri}{due_text}\n  {note}".rstrip())
+                        visible_tasks.append(p)
+                    except Exception as e:
+                        print("[ERROR] formatting /check task line:", e)
+                        continue
+
+                # cache LAST_TASKS for /done (only tasks we showed)
+                try:
+                    global LAST_TASKS
+                    LAST_TASKS = [p.get("id") for p in visible_tasks if p and isinstance(p, dict)]
+                except Exception:
+                    LAST_TASKS = []
+
+                # send message
+                send_telegram("\n".join(lines))
                 return jsonify({"ok": True}), 200
-            lines = [f"🔔 <b>Danh sách nhiệm vụ tuần {start_week.strftime('%d/%m')} - {end_week.strftime('%d/%m')}</b>", ""]
-            for i, p in enumerate(tasks, start=1):
-                lines.append(format_task_line(i, p))
-            LAST_TASKS = [p.get("id") for p in tasks]
-            send_telegram("\n".join(lines).strip())
-            return jsonify({"ok": True, "count": len(LAST_TASKS)}), 200
+
+            except Exception as e:
+                print("Error handling /check:", e)
+                send_telegram("❌ Lỗi khi lấy danh sách nhiệm vụ. Vui lòng thử lại sau.")
+                return jsonify({"ok": True}), 200
+
         # /done
         elif cmd.lower().startswith("/done."):
             if not isinstance(LAST_TASKS, list):
