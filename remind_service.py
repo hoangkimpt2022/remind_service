@@ -691,123 +691,118 @@ def job_weekly():
     now = datetime.datetime.now(TZ).date()
     start_week, end_week = week_range(now)
 
-    # --- Fetch pages that are marked Done (don't filter by completed date at Notion side) ---
-    filters_done = [{"property": PROP_DONE, "checkbox": {"equals": True}}]
+    # Fetch DONE items for this week (not filter in Notion because date may be formula)
+    filters = [
+        {"property": PROP_DONE, "checkbox": {"equals": True}}
+    ]
     if PROP_ACTIVE:
-        filters_done.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
+        filters.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
 
     try:
-        # note: notion_query accepts {"and": filters} in current wrapper
-        done_pages = notion_query(REMIND_DB, {"and": filters_done})
-    except Exception as e:
-        print("[WARN] job_weekly: notion_query for done_pages failed:", e)
+        done_pages = notion_query(REMIND_DB, {"and": filters})
+    except:
         done_pages = []
 
-    # Now compute done_this_week by examining completed datetime per page
     done_this_week = []
-    for p in done_pages:
-        try:
-            comp_dt = _parse_completed_datetime_from_page(p)
-            if comp_dt is None:
-                # nothing to check
-                continue
-            comp_date = comp_dt.date() if isinstance(comp_dt, datetime.datetime) else comp_dt
-            if comp_date >= start_week and comp_date <= end_week:
-                done_this_week.append(p)
-        except Exception as ex:
-            print("[WARN] job_weekly: error parsing completed date for page", p.get("id"), ex)
-            continue
-
-    # daily_done: items completed this week that are 'hằng' type
     daily_done = 0
-    for p in done_this_week:
-        try:
+    overdue_done = 0
+
+    for p in done_pages:
+        comp_dt = _parse_completed_datetime_from_page(p)
+        if not comp_dt:
+            continue
+        comp_date = comp_dt.date()
+
+        if start_week <= comp_date <= end_week:
+            done_this_week.append(p)
+
+            # count daily done
             ttype = get_select_name(p, PROP_TYPE) or ""
             if "hằng" in ttype.lower():
                 daily_done += 1
-        except Exception:
-            continue
 
-    # overdue_done: among done_this_week, count where completed date > due date
-    overdue_done = 0
-    for p in done_this_week:
-        try:
-            due = get_date_start(p, PROP_DUE)  # due might be date; get_date_start is OK
-            comp = _parse_completed_datetime_from_page(p)
-            if due and comp and comp.date() > due.date():
+            # overdue? (completed after due date)
+            due = get_date_start(p, PROP_DUE)
+            if due and comp_date > due.date():
                 overdue_done += 1
-        except Exception:
-            continue
 
-    # Overdue not done: tasks not done and due before today (same as before)
+    # Overdue not done
     filters2 = [
         {"property": PROP_DONE, "checkbox": {"equals": False}},
-        {"property": PROP_DUE, "date": {"before": datetime.datetime.now(TZ).date().isoformat()}}
+        {"property": PROP_DUE, "date": {"before": now.isoformat()}}
     ]
     if PROP_ACTIVE:
         filters2.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
     try:
-        q2 = notion_query(REMIND_DB, {"and": filters2})
-        overdue_remaining = len(q2)
-    except Exception as e:
-        print("[WARN] job_weekly: notion_query overdue_remaining failed:", e)
+        overdue_remaining = len(notion_query(REMIND_DB, {"and": filters2}))
+    except:
         overdue_remaining = 0
 
-    # --- Goals summary: unchanged logic but robust to missing values ---
+    # ---- GOALS SUMMARY ----
     goals_summary = []
     if GOALS_DB:
         try:
             goals = notion_query(GOALS_DB)
-        except Exception as e:
-            print("[WARN] job_weekly: notion_query GOALS_DB failed:", e)
+        except:
             goals = []
-        for g in goals:
-            try:
-                ginfo = read_goal_properties(g)
-            except Exception as e:
-                print("[WARN] job_weekly: read_goal_properties failed for goal:", g.get("id"), e)
-                ginfo = {}
 
-            total = ginfo.get("tong_nhiem_vu_rollup")
-            done_total = ginfo.get("nhiem_vu_da_hoan_rollup")
-            weekly_done = ginfo.get("nhiem_vu_hoan_tuan_rollup")
-            progress_pct = None
-            if ginfo.get("tien_do_formula") is not None:
+        for g in goals:
+            ginfo = read_goal_properties(g)
+
+            total = ginfo.get("tong_nhiem_vu_rollup") or 0
+            done_total = ginfo.get("nhiem_vu_da_hoan_rollup") or 0
+            weekly_done = ginfo.get("nhiem_vu_hoan_tuan_rollup") or 0
+
+            # FIX TIẾN ĐỘ: ưu tiên progress_pct từ read_goal_properties
+            progress_pct = ginfo.get("progress_pct")
+
+            # fallback nếu vẫn None
+            if progress_pct is None:
+                raw = ginfo.get("tien_do_formula")
+                if raw is not None:
+                    try:
+                        rp = str(raw).strip().replace("%", "")
+                        val = float(rp)
+                        if val <= 1:
+                            val = val * 100
+                        progress_pct = int(round(val))
+                    except:
+                        progress_pct = None
+
+            if progress_pct is None:
                 try:
-                    progress_pct = int(float(ginfo["tien_do_formula"]))
-                except:
-                    progress_pct = None
-            elif total is not None and done_total is not None:
-                try:
-                    progress_pct = round(done_total / total * 100) if total and total > 0 else 0
+                    progress_pct = int(round(done_total / total * 100)) if total else 0
                 except:
                     progress_pct = 0
 
-            if total is not None:
-                goals_summary.append({
-                    "name": ginfo.get("title") or "(no title)",
-                    "progress": int(progress_pct) if progress_pct is not None else 0,
-                    "done": done_total or 0,
-                    "total": total or 0,
-                    "weekly_done": weekly_done or 0
-                })
+            goals_summary.append({
+                "name": ginfo.get("title"),
+                "progress": progress_pct,
+                "done": done_total,
+                "total": total,
+                "weekly_done": weekly_done
+            })
 
-    # Build weekly message
-    lines = [f"📊 <b>Báo cáo tuần — {datetime.datetime.now(TZ).date().strftime('%d/%m/%Y')}</b>", ""]
+    # ---- BUILD MESSAGE ----
+    lines = [f"📊 <b>Báo cáo tuần — {now.strftime('%d/%m/%Y')}</b>", ""]
     lines.append("🔥 <b>Công việc hằng ngày</b>")
     lines.append(f"• ✔ Hoàn thành: {daily_done}")
     lines.append(f"• ⏳ Quá hạn đã hoàn thành: {overdue_done}")
     lines.append(f"• 🆘 Quá hạn chưa làm: {overdue_remaining}")
     lines.append("")
     lines.append("🎯 <b>Mục tiêu nổi bật</b>")
+
+    # Sort by progress descending
     for g in sorted(goals_summary, key=lambda x: -x['progress'])[:6]:
         bar = render_progress_bar(g['progress'])
         lines.append(f"• {g['name']}")
         lines.append(f"  → Tiến độ: {g['progress']}% ({g['done']}/{g['total']}) {bar}")
         lines.append(f"  → Nhiệm vụ hoàn thành tuần này: {g['weekly_done']}")
+
     lines.append("")
     lines.append("📈 <b>Tổng quan</b>")
     lines.append("Sếp đang tiến rất tốt! hãy lăn quả cùa tuyết này để tiến tới hoàn thành mục tiêu lớn. 🎯 Tuần sau bứt phá thêm nhé! 🔥🔥🔥")
+
     send_telegram("\n".join(lines))
 
 def job_monthly():
