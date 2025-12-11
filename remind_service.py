@@ -38,15 +38,16 @@ MONTHLY_HOUR = int(os.getenv("MONTHLY_HOUR", "08"))
 RUN_ON_START = os.getenv("RUN_ON_START", "true").lower() in ("1", "true", "yes")
 
 HEADERS = {
-    "Authorization": f"Bearer {NOTION_TOKEN}" if NOTION_TOKEN else "",
     "Notion-Version": "2022-06-28",
     "Content-Type": "application/json"
 }
+if NOTION_TOKEN:
+    HEADERS["Authorization"] = f"Bearer {NOTION_TOKEN}"
 
 # ---------- PROPERTY NAMES (defaults provided per user's spec) ----------
 PROP_TITLE = os.getenv("PROP_TITLE", "Aa name")
 PROP_DONE = os.getenv("PROP_DONE", "Done")
-PROP_ACTIVE = os.getenv("PROP_ACTIVE", "active")
+PROP_ACTIVE = os.getenv("PROP_ACTIVE", "").strip()
 PROP_DUE = os.getenv("PROP_DUE", "Ngày cần làm")
 PROP_COMPLETED = os.getenv("PROP_COMPLETED", "Ngày hoàn thành thực tế")
 PROP_REL_GOAL = os.getenv("PROP_REL_GOAL", "Related Mục tiêu")
@@ -232,68 +233,39 @@ def render_progress_bar(percent, length=18):
     bar = "█" * filled_len + "-" * (length - filled_len)
     return f"[{bar}] {pct}%"
 
-# ---------------- Goal property reader (robust) ----------------
-def read_goal_properties(goal_page):
-    props = goal_page.get("properties", {})
+# ---------------- Goal helpers (robust & separated) ----------------
+import json
 
-    def safe_select(k):
-        v = props.get(k, {})
-        sel = v.get("select")
-        if sel and isinstance(sel, dict):
-            return sel.get("name")
-        return None
+def extract_plain_text_from_rich_text(rich):
+    if not rich:
+        return ""
+    return "".join(part.get("plain_text","") for part in rich)
 
-    def safe_date(k):
-        v = props.get(k, {})
-        raw = v.get("date", {}).get("start")
-        if raw:
-            try:
-                return dateparser.parse(raw).date()
-            except:
-                return None
+def find_prop_key(props: dict, key_like: str):
+    """Best-effort find property key by exact or case-insensitive match."""
+    if not props or not key_like:
         return None
+    # exact match
+    if key_like in props:
+        return key_like
+    # case-insensitive match on names
+    low = key_like.lower()
+    for k in props.keys():
+        if k.lower() == low:
+            return k
+    # fuzzy: contains
+    for k in props.keys():
+        if low in k.lower():
+            return k
+    return None
 
-    def safe_formula(k):
-        v = props.get(k, {})
-        f = v.get("formula")
-        if f:
-            if "string" in f and f.get("string") is not None:
-                return f.get("string")
-            if "number" in f and f.get("number") is not None:
-                return f.get("number")
-            if "date" in f and f.get("date") is not None:
-                try:
-                    return dateparser.parse(f.get("date").get("start")).date()
-                except:
-                    return None
-        return None
-
-    def safe_rollup_number(k):
-        v = props.get(k, {})
-        ru = v.get("rollup")
-        if ru:
-            if "number" in ru and ru.get("number") is not None:
-                return ru.get("number")
-            arr = ru.get("array")
-            if isinstance(arr, list):
-                return len(arr)
-        return None
-
-    def safe_text(k):
-        v = props.get(k, {})
-        rt = v.get("rich_text", [])
-        if rt:
-            return "".join([t.get("plain_text","") for t in rt])
-        if "title" in v and v.get("title"):
-            return "".join([t.get("plain_text","") for t in v.get("title",[])])
-        return None
-    def extract_prop_text(props: Dict[str, Any], key_like: str) -> str:
+def extract_prop_text(props: dict, key_like: str) -> str:
     """
     Robust extractor for Notion property values.
     Supports: title, rich_text, number, date, checkbox, select, multi_select, relation, formula, rollup.
-    Returns string (empty if not present).
+    Returns string or empty string.
     """
-    if not props:
+    if not props or not key_like:
         return ""
     k = find_prop_key(props, key_like)
     if not k:
@@ -304,46 +276,46 @@ def read_goal_properties(goal_page):
     # FORMULA
     if ptype == "formula":
         formula = prop.get("formula", {})
-        ftype = formula.get("type")
-        if ftype == "number" and formula.get("number") is not None:
-            return str(formula.get("number"))
-        if ftype == "string" and formula.get("string"):
+        # formula may expose keys string/number/boolean/date
+        if formula.get("string") is not None:
             return str(formula.get("string"))
-        if ftype == "boolean" and formula.get("boolean") is not None:
+        if formula.get("number") is not None:
+            return str(formula.get("number"))
+        if formula.get("boolean") is not None:
             return "1" if formula.get("boolean") else "0"
-        if ftype == "date" and formula.get("date"):
-            return formula["date"].get("start", "")
+        if formula.get("date"):
+            return formula["date"].get("start", "") or ""
         return ""
 
     # ROLLUP
     if ptype == "rollup":
         roll = prop.get("rollup", {})
-        rtype = roll.get("type")
-        if rtype == "number" and roll.get("number") is not None:
+        # numeric rollup
+        if roll.get("number") is not None:
             return str(roll.get("number"))
-        if rtype == "array":
-            arr = roll.get("array", [])
-            if arr:
-                first = arr[0]
-                # attempt to extract number or text
-                if isinstance(first, dict):
-                    if "number" in first and first.get("number") is not None:
-                        return str(first.get("number"))
-                    # for title-like
-                    if "title" in first:
-                        return extract_plain_text_from_rich_text(first.get("title", []))
-                    if "plain_text" in first:
-                        return first.get("plain_text", "")
-                return str(first)
+        # array rollup: try extract first element text/number
+        arr = roll.get("array") or []
+        if arr:
+            first = arr[0]
+            if isinstance(first, dict):
+                # if relation-like
+                if first.get("id"):
+                    return first.get("id")
+                # if has title or plain_text
+                if "title" in first:
+                    return extract_plain_text_from_rich_text(first.get("title", []))
+                if "plain_text" in first:
+                    return first.get("plain_text", "")
+            return str(first)
         return ""
 
     # TITLE
     if ptype == "title":
-        return extract_plain_text_from_rich_text(prop.get("title", []))
+        return extract_plain_text_from_rich_text(prop.get("title", [])) or ""
     if ptype == "rich_text":
-        return extract_plain_text_from_rich_text(prop.get("rich_text", []))
+        return extract_plain_text_from_rich_text(prop.get("rich_text", [])) or ""
     if ptype == "number":
-        return str(prop.get("number"))
+        return "" if prop.get("number") is None else str(prop.get("number"))
     if ptype == "date":
         d = prop.get("date", {}) or {}
         return d.get("start", "") or ""
@@ -351,55 +323,107 @@ def read_goal_properties(goal_page):
         return "1" if prop.get("checkbox") else "0"
     if ptype == "select":
         sel = prop.get("select") or {}
-        return sel.get("name", "")
+        return sel.get("name", "") or ""
     if ptype == "multi_select":
         arr = prop.get("multi_select") or []
         return ", ".join(a.get("name", "") for a in arr)
     if ptype == "relation":
         rel = prop.get("relation") or []
         if rel:
-            # return first relation id
-            return rel[0].get("id", "")
+            return rel[0].get("id", "") or ""
     return ""
-    def read_goal_properties(page):
-    props = page.get("properties", {}) or {}
 
-    return {
-    "id": page.get("id", ""),
-    "title": extract_prop_text(props, "Name"),
-    "start": extract_prop_text(props, "Ngày bắt đầu"),
-    "end": extract_prop_text(props, "Ngày hoàn thành"),
-    "countdown": extract_prop_text(props, "Đếm ngược"),
-    "progress": extract_prop_text(props, "Tiến Độ"),
-    "total_tasks": extract_prop_text(props, "Tổng nhiệm vụ cần làm"),
-    "done_tasks": extract_prop_text(props, "Nhiệm vụ đã hoàn thành"),
-    "remain_tasks": extract_prop_text(props, "Nhiệm vụ còn lại"),
-    "week_done": extract_prop_text(props, "Nhiệm vụ hoàn thành tuần này"),
-    "month_done": extract_prop_text(props, "Nhiệm vụ hoàn thành tháng này"),
-    }
+def safe_select(props: dict, name: str):
+    k = find_prop_key(props, name)
+    if not k:
+        return None
+    v = props.get(k, {})
+    sel = v.get("select")
+    if sel and isinstance(sel, dict):
+        return sel.get("name")
+    return None
 
+def safe_date(props: dict, name: str):
+    k = find_prop_key(props, name)
+    if not k:
+        return None
+    raw = props.get(k, {}).get("date", {}).get("start")
+    if not raw:
+        return None
+    try:
+        return dateparser.parse(raw).date()
+    except:
+        return None
+
+def safe_formula(props: dict, name: str):
+    k = find_prop_key(props, name)
+    if not k:
+        return None
+    f = props.get(k, {}).get("formula")
+    if not f:
+        return None
+    if "string" in f and f.get("string") is not None:
+        return f.get("string")
+    if "number" in f and f.get("number") is not None:
+        return f.get("number")
+    if "date" in f and f.get("date") is not None:
+        try:
+            return dateparser.parse(f.get("date").get("start")).date()
+        except:
+            return None
+    return None
+
+def safe_rollup_number(props: dict, name: str):
+    k = find_prop_key(props, name)
+    if not k:
+        return None
+    ru = props.get(k, {}).get("rollup")
+    if not ru:
+        return None
+    if ru.get("number") is not None:
+        return ru.get("number")
+    arr = ru.get("array") or []
+    return len(arr) if isinstance(arr, list) else None
+
+def read_goal_properties(goal_page):
+    """
+    Normalize goal page into dictionary with keys:
+    id, title, start, end, countdown, progress, total_tasks, done_tasks, remain, weekly_done, monthly_done, days_remaining_computed
+    """
+    props = goal_page.get("properties", {}) or {}
     out = {}
-    out["id"] = goal_page.get("id")
-    out["title"] = get_title(goal_page)
-    out["trang_thai"] = safe_select(GOAL_PROP_STATUS)
-    out["ngay_bat_dau"] = safe_date(GOAL_PROP_START)
-    out["ngay_hoan_thanh"] = safe_date(GOAL_PROP_END)
-    out["dem_nguoc_formula"] = safe_formula(GOAL_PROP_COUNTDOWN)
-    out["tien_do_formula"] = safe_formula(GOAL_PROP_PROGRESS)
-    out["tong_nhiem_vu_rollup"] = safe_rollup_number(GOAL_PROP_TOTAL_TASKS)
-    out["nhiem_vu_da_hoan_rollup"] = safe_rollup_number(GOAL_PROP_DONE_TASKS)
-    out["nhiem_vu_con_lai_formula"] = safe_formula(GOAL_PROP_REMAIN)
-    out["nhiem_vu_hoan_tuan_rollup"] = safe_rollup_number(GOAL_PROP_DONE_WEEK)
-    out["nhiem_vu_hoan_thang_rollup"] = safe_rollup_number(GOAL_PROP_DONE_MONTH)
-    # computed days remaining if dem_nguoc absent
+    out["id"] = goal_page.get("id", "")
+    # title
+    title = ""
+    for k,v in props.items():
+        if v.get("type") == "title":
+            title = extract_plain_text_from_rich_text(v.get("title", []))
+            break
+    out["title"] = title or get_title(goal_page) or out["id"]
+
+    out["trang_thai"] = safe_select(props, GOAL_PROP_STATUS)
+    out["ngay_bat_dau"] = safe_date(props, GOAL_PROP_START)
+    out["ngay_hoan_thanh"] = safe_date(props, GOAL_PROP_END)
+    out["dem_nguoc_formula"] = safe_formula(props, GOAL_PROP_COUNTDOWN)
+    out["tien_do_formula"] = safe_formula(props, GOAL_PROP_PROGRESS)
+    out["tong_nhiem_vu_rollup"] = safe_rollup_number(props, GOAL_PROP_TOTAL_TASKS)
+    out["nhiem_vu_da_hoan_rollup"] = safe_rollup_number(props, GOAL_PROP_DONE_TASKS)
+    out["nhiem_vu_con_lai_formula"] = safe_formula(props, GOAL_PROP_REMAIN)
+    out["nhiem_vu_hoan_tuan_rollup"] = safe_rollup_number(props, GOAL_PROP_DONE_WEEK)
+    out["nhiem_vu_hoan_thang_rollup"] = safe_rollup_number(props, GOAL_PROP_DONE_MONTH)
+
+    # computed fallback: days remaining from end date
     out["days_remaining_computed"] = None
-    if out["dem_nguoc_formula"] is None and out["ngay_hoan_thanh"]:
+    if out.get("dem_nguoc_formula") is None and out.get("ngay_hoan_thanh"):
         try:
             today = datetime.datetime.now(TZ).date()
             out["days_remaining_computed"] = (out["ngay_hoan_thanh"] - today).days
         except:
             out["days_remaining_computed"] = None
+
     return out
+
+# ---------------- end Goal helpers ----------------
 
 # ---------------- Build task text ----------------
 def format_task_line(i, page):
@@ -869,7 +893,3 @@ if __name__ == "__main__":
         port = int(os.getenv("PORT", 5000))
         print(f"Starting Flask server on port {port} for webhook mode.")
         app.run(host="0.0.0.0", port=port, threaded=True)
-
-
-
-
