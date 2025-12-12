@@ -2,12 +2,21 @@ name: Weekly & Monthly & Daily Ping Remind Service
 
 on:
   schedule:
-    # Daily: 13:55 VN = 06:55 UTC
+    # WARMUP (20 minutes before) - DAILY: 13:35 VN = 06:35 UTC
+    - cron: "35 6 * * *"
+    # MAIN DAILY - 13:55 VN = 06:55 UTC
     - cron: "55 6 * * *"
-    # Weekly: Sunday 19:55 VN = 12:55 UTC
+
+    # WARMUP (20m) - WEEKLY: Sun 19:35 VN = Sun 12:35 UTC
+    - cron: "35 12 * * 0"
+    # MAIN WEEKLY - Sun 19:55 VN = Sun 12:55 UTC
     - cron: "55 12 * * 0"
-    # Monthly check: 07:55 VN = 00:55 UTC
+
+    # WARMUP (20m) - MONTHLY CHECK: 07:35 VN = 00:35 UTC
+    - cron: "35 0 * * *"
+    # MAIN MONTHLY CHECK - 07:55 VN = 00:55 UTC
     - cron: "55 0 * * *"
+    
   workflow_dispatch: {}
 
 env:
