@@ -2,111 +2,71 @@ name: Weekly & Monthly & Daily Ping Remind Service
 
 on:
   schedule:
-    # Daily: mỗi ngày 13:55 VN = 06:55 UTC
+    # Daily: 13:55 VN = 06:55 UTC
     - cron: "55 6 * * *"
-    # Weekly: Chủ nhật 19:55 VN = Chủ nhật 12:55 UTC
+    # Weekly: Sunday 19:55 VN = 12:55 UTC
     - cron: "55 12 * * 0"
-    # Daily at 07:55 VN = 00:55 UTC -> dùng để phát hiện ngày cuối tháng
+    # Monthly check: 07:55 VN = 00:55 UTC
     - cron: "55 0 * * *"
-  workflow_dispatch: {} # cho phép chạy tay để test
+  workflow_dispatch: {}
 
 env:
   BASE_URL: "https://remind-service.onrender.com"
-  DAILY_PATH: "/"                    # đổi nếu muốn ping /health hoặc endpoint khác
-  WEEKLY_PATH: "/report/weekly"
-  MONTHLY_PATH: "/report/monthly"
-  CURL_OPTS: "--max-time 30 -sS -w '\\nHTTP_CODE:%{http_code}\\n'"
+  DAILY_PATH: "/"
+  WEEKLY_PATH: "/debug/run_weekly"
+  MONTHLY_PATH: "/debug/run_monthly"
+  HEALTH_PATH: "/health"
+  CURL_OPTS: "-sS -L --max-time 120 --retry 3 --retry-delay 5 -w '\\nHTTP_CODE:%{http_code}\\n'"
 
 jobs:
-  daily_ping:
-    name: Daily ping (13:55 VN)
+  ping_jobs:
     runs-on: ubuntu-latest
     steps:
-      - name: Check this run is daily 13:55 VN (UTC 06:55)
-        run: |
-          HOUR=$(date -u +%H)
-          MIN=$(date -u +%M)
-          echo "UTC time: ${HOUR}:${MIN}"
-          if [ "$HOUR" != "06" ] || [ "$MIN" != "55" ]; then
-            echo "Not the daily 06:55 UTC run — skipping daily ping."
-            exit 0
-          fi
-          echo "This is daily 06:55 UTC — proceeding."
-      - name: Ping daily endpoint
-        run: |
-          url="${BASE_URL}${DAILY_PATH}"
-          echo "Pinging daily URL: $url"
-          resp=$(curl $CURL_OPTS "$url" 2>&1) || true
-          echo "$resp"
-          http_code=$(echo "$resp" | tr '\n' ' ' | sed -n "s/.*HTTP_CODE:\([0-9]\{3\}\).*/\1/p")
-          echo "HTTP code: ${http_code:-000}"
-          if ! echo "$http_code" | grep -E '^2[0-9][0-9]$' >/dev/null; then
-            echo "Daily ping failed (HTTP ${http_code:-000})"
-            exit 1
-          fi
-          echo "Daily ping succeeded."
+      - name: Show UTC time
+        run: date -u
 
-  weekly_ping:
-    name: Weekly report (Sunday 19:55 VN)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check if this run is the intended weekly time (UTC Sunday 12:55)
+      - name: Wake Render /health
         run: |
-          DOW=$(date -u +%u)   # 1..7 (Mon..Sun)
-          HOUR=$(date -u +%H)
-          MIN=$(date -u +%M)
-          echo "UTC DOW=$DOW hour=$HOUR min=$MIN"
-          # weekly cron is scheduled for Sunday 12:55 UTC
-          if [ "$DOW" != "7" ] || [ "$HOUR" != "12" ] || [ "$MIN" != "55" ]; then
-            echo "Not the weekly scheduled time — skipping weekly ping."
-            exit 0
-          fi
-          echo "It's Sunday 12:55 UTC — proceed to weekly ping."
-      - name: Ping weekly endpoint
-        run: |
-          url="${BASE_URL}${WEEKLY_PATH}"
-          echo "Pinging weekly URL: $url"
-          resp=$(curl $CURL_OPTS "$url" 2>&1) || true
-          echo "$resp"
-          http_code=$(echo "$resp" | tr '\n' ' ' | sed -n 's/.*HTTP_CODE:\([0-9]\{3\}\).*/\1/p')
-          echo "HTTP code: ${http_code:-000}"
-          if ! echo "$http_code" | grep -E '^2[0-9][0-9]$' >/dev/null; then
-            echo "Weekly ping failed (HTTP ${http_code:-000})"
-            exit 1
-          fi
-          echo "Weekly ping succeeded."
+          echo "Waking Render..."
+          for i in 1 2 3; do
+            echo "Wake attempt #$i"
+            curl -v --max-time 15 "$BASE_URL$HEALTH_PATH" || true
+            sleep 3
+          done
+          echo "Warm-up wait..."
+          sleep 8
 
-  monthly_ping:
-    name: Monthly report (last day 07:55 VN)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check if today is last day of month (UTC at 00:55 -> VN 07:55)
+      - name: Daily ping (13:55 VN)
         run: |
-          # workflow is triggered daily at 00:55 UTC as well
-          HOUR=$(date -u +%H)
-          MIN=$(date -u +%M)
-          echo "UTC time: ${HOUR}:${MIN}"
-          if [ "$HOUR" != "00" ] || [ "$MIN" != "55" ]; then
-            echo "Not the daily 00:55 UTC run — skipping monthly check."
-            exit 0
+          HOUR=$(date -u +%H); MIN=$(date -u +%M)
+          if [ "$HOUR" = "06" ] && [ "$MIN" = "55" ]; then
+            echo "Running DAILY ping..."
+            curl -v $CURL_OPTS "$BASE_URL$DAILY_PATH"
+          else
+            echo "Skip daily"
           fi
-          TOMORROW_DAY=$(date -u -d "tomorrow" +%d)
-          echo "Tomorrow day-of-month (UTC) = $TOMORROW_DAY"
-          if [ "$TOMORROW_DAY" != "01" ]; then
-            echo "Not last day of month (UTC). Skipping monthly ping."
-            exit 0
-          fi
-          echo "Today is last day of month (UTC) — proceed to monthly ping."
-      - name: Ping monthly endpoint
+
+      - name: Weekly ping (Sunday 19:55 VN)
         run: |
-          url="${BASE_URL}${MONTHLY_PATH}"
-          echo "Pinging monthly URL: $url"
-          resp=$(curl $CURL_OPTS "$url" 2>&1) || true
-          echo "$resp"
-          http_code=$(echo "$resp" | tr '\n' ' ' | sed -n "s/.*HTTP_CODE:\([0-9]\{3\}\).*/\1/p")
-          echo "HTTP code: ${http_code:-000}"
-          if ! echo "$http_code" | grep -E '^2[0-9][0-9]$' >/dev/null; then
-            echo "Monthly ping failed (HTTP ${http_code:-000})"
-            exit 1
+          HOUR=$(date -u +%H); MIN=$(date -u +%M); DOW=$(date -u +%u)
+          if [ "$DOW" = "7" ] && [ "$HOUR" = "12" ] && [ "$MIN" = "55" ]; then
+            echo "Running WEEKLY ping..."
+            curl -v $CURL_OPTS "$BASE_URL$WEEKLY_PATH"
+          else
+            echo "Skip weekly"
           fi
-          echo "Monthly ping succeeded."
+
+      - name: Monthly ping (last day 07:55 VN)
+        run: |
+          HOUR=$(date -u +%H); MIN=$(date -u +%M)
+          if [ "$HOUR" = "00" ] && [ "$MIN" = "55" ]; then
+            TOMORROW=$(date -u -d "tomorrow" +%d)
+            if [ "$TOMORROW" = "01" ]; then
+              echo "Running MONTHLY ping..."
+              curl -v $CURL_OPTS "$BASE_URL$MONTHLY_PATH"
+            else
+              echo "Not last day — skip monthly"
+            fi
+          else
+            echo "Skip monthly time check"
+          fi
