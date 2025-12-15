@@ -178,6 +178,14 @@ def get_title(page):
             return "".join([t.get("plain_text", "") for t in v.get("title", [])])
     return "Untitled"
 
+def get_note_text(page):
+    if not PROP_NOTE:
+        return ""
+    prop = page.get("properties", {}).get(PROP_NOTE, {})
+    if prop.get("type") == "rich_text":
+        return extract_plain_text_from_rich_text(prop.get("rich_text", []))
+    return ""
+
 def get_checkbox(page, prop_name):
     if not prop_name:
         return False
@@ -543,6 +551,7 @@ def job_daily():
                 continue
             title = get_title(p)
             pri = get_select_name(p, PROP_PRIORITY) or ""
+            note_text = get_note_text(p)
             due_dt = get_date_start(p, PROP_DUE)
             due_text = f" — hạn: {format_dt(due_dt)}" if due_dt else ""
             d = overdue_days(p)
@@ -555,7 +564,18 @@ def job_daily():
                     sym = "🟡"; note = "↳💥Làm Ngay Hôm nay!"
                 else:
                     sym = "🟢"; note = f"↳Còn {abs(d)} ngày nữa"
-            lines.append(f"{i} {sym} <b>{title}</b> — Cấp độ: {pri}{due_text}\n  {note}".rstrip())
+            line = f"{i} {sym} <b>{title}</b> — Cấp độ: {pri}{due_text}"
+
+            # note từ cột Notion (rich_text)
+            if note_text:
+                line += f"\n📝 {note_text}"
+
+            # note hệ thống (quá hạn / hôm nay / còn bao nhiêu ngày)
+            if note:
+                line += f"\n  {note}"
+
+            lines.append(line)
+
         except Exception as ex:
             print("[ERROR] formatting task line:", ex)
             continue
@@ -621,6 +641,7 @@ def job_daily():
                             continue
                         title = get_title(p)
                         pri = get_select_name(p, PROP_PRIORITY) or ""
+                        note_text = get_note_text(p)
                         due_dt = get_date_start(p, PROP_DUE)
                         due_text = f" — hạn: {format_dt(due_dt)}" if due_dt else ""
                         d = overdue_days(p)
@@ -633,7 +654,16 @@ def job_daily():
                                 note = "↳💥Làm Ngay Hôm nay!"; sym = ""
                             else:
                                 note = f"↳Còn {abs(d)} ngày nữa"; sym = "🟢"
-                        goal_lines.append(f"   - {sym} {title} — Cấp độ: {pri}{due_text}\n     {note}")
+                        line = f"   - {sym} <b>{title}</b> — Cấp độ: {pri}{due_text}"
+                        # note từ Notion (rich_text)
+                        note_text = get_note_text(p)
+                        if note_text:
+                            line += f"\n     📝 {note_text}"
+                        # note hệ thống (quá hạn / hôm nay / còn bao nhiêu ngày)
+                        if note:
+                            line += f"\n     {note}"
+                        goal_lines.append(line)
+
                     except Exception as ex2:
                         print("[ERROR] listing related task:", ex2)
                         continue
@@ -896,6 +926,7 @@ def webhook():
 
                         title = get_title(p)
                         pri = get_select_name(p, PROP_PRIORITY) or ""
+                        note_text = get_note_text(p)
                         # due date/time
                         due_dt = None
                         try:
@@ -931,8 +962,18 @@ def webhook():
                                 sym = "🟢"
                                 note = f"↳Còn {abs(d)} ngày nữa"
                         # append formatted line
-                        lines.append(f"{len(visible_tasks)+1} {sym} <b>{title}</b> — Cấp độ: {pri}{due_text}\n  {note}".rstrip())
-                        visible_tasks.append(p)
+                        line = f"{len(visible_tasks)+1} {sym} <b>{title}</b> — Cấp độ: {pri}{due_text}"
+
+                        # note từ Notion (rich_text)
+                        if note_text:
+                            line += f"\n📝 {note_text}"
+
+                        # note hệ thống (quá hạn / hôm nay / còn bao nhiêu ngày)
+                        if note:
+                            line += f"\n  {note}"
+
+                        lines.append(line)
+
                     except Exception as e:
                         print("[ERROR] formatting /check task line:", e)
                         traceback.print_exc()
@@ -1209,4 +1250,5 @@ if __name__ == "__main__":
         port = int(os.getenv("PORT", 5000))
         print(f"Starting Flask server on port {port} for webhook mode.")
         app.run(host="0.0.0.0", port=port, threaded=True)
+
 
