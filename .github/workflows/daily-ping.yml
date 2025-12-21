@@ -10,7 +10,7 @@ on:
     # WARMUP (20m) - WEEKLY: Sun 19:35 VN = Sun 12:35 UTC
     - cron: "35 12 * * 0"
     # MAIN WEEKLY - Sun 19:55 VN = Sun 12:55 UTC
-    - cron: "55 12 * * 0"
+    - cron: "45 12 * * 0"
 
     # WARMUP (20m) - MONTHLY CHECK: 07:35 VN = 00:35 UTC
     - cron: "35 0 * * *"
