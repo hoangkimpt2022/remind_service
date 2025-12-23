@@ -1093,7 +1093,11 @@ def debug_schema():
 @app.route("/health", methods=["GET"])
 def health():
     return "OK", 200
-
+    
+@app.route("/wake", methods=["GET"])
+def wake():
+    return "ok", 200
+    
 # ---------------- Schema debug helper (print at startup) ----------------
 def print_db_schema_once(db_id, label="DB"):
     try:
@@ -1250,5 +1254,6 @@ if __name__ == "__main__":
         port = int(os.getenv("PORT", 5000))
         print(f"Starting Flask server on port {port} for webhook mode.")
         app.run(host="0.0.0.0", port=port, threaded=True)
+
 
 
