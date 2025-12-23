@@ -513,6 +513,18 @@ def format_task_line(i, page):
         note = f"↳⏳ Còn {abs(delta)} ngày nữa"
 
     return f"{i} {icon} <b>{title}</b> — Cấp độ: {pri}\n  {note}".rstrip()
+# ---------------- Priority emoji helper ----------------
+def priority_emoji(priority: str) -> str:
+    if not priority:
+        return "🟡"
+    p = priority.strip().lower()
+    if p == "cao":
+        return "🔴"
+    if p in ("tb", "trung bình"):
+        return "🟡"
+    if p == "thấp":
+        return "🟢"
+    return "🟡"
 
 # ---------------- Jobs (daily / weekly / monthly) ----------------
 def job_daily():
@@ -595,11 +607,11 @@ def job_daily():
             if d is None:
                 sys_note = ""
             elif d > 0:
-                sys_note = f"↳ Đã trễ {d} ngày, làm ngay đi sếp ơi!"
+                sys_note = f"↳⏰ Đã trễ {d} ngày, làm ngay đi sếp ơi!"
             elif d == 0:
                 sys_note = "↳💥Làm Ngay Hôm nay!"
             else:
-                sys_note = f"↳Còn {abs(d)} ngày nữa"
+                sys_note = f"↳⏳ Còn {abs(d)} ngày nữa"
 
             line = f"{i} {sym} <b>{title}</b> — Cấp độ: {pri}{due_text}"
 
@@ -1265,5 +1277,3 @@ if __name__ == "__main__":
         port = int(os.getenv("PORT", 5000))
         print(f"Starting Flask server on port {port} for webhook mode.")
         app.run(host="0.0.0.0", port=port, threaded=True)
-
-
