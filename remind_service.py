@@ -957,8 +957,8 @@ def webhook():
 
                         title = get_title(p)
                         pri = get_select_name(p, PROP_PRIORITY) or ""
-                        note_text = get_note_text(p)
                         sym = priority_emoji(pri)
+                        note_text = get_note_text(p)                   
                         # due date/time
                         due_dt = None
                         try:
@@ -1278,4 +1278,5 @@ if __name__ == "__main__":
         port = int(os.getenv("PORT", 5000))
         print(f"Starting Flask server on port {port} for webhook mode.")
         app.run(host="0.0.0.0", port=port, threaded=True)
+
 
