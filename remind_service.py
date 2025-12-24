@@ -975,6 +975,7 @@ def webhook():
 
                         due_text = f" — hạn: {format_dt(due_dt) if isinstance(due_dt, datetime.datetime) or isinstance(due_dt, datetime.date) else due_dt}" if due_dt else ""
                         # overdue/remaining note
+                        note = ""
                         d = overdue_days(p)
                         if d is None:
                             sys_note = ""
@@ -1278,5 +1279,6 @@ if __name__ == "__main__":
         port = int(os.getenv("PORT", 5000))
         print(f"Starting Flask server on port {port} for webhook mode.")
         app.run(host="0.0.0.0", port=port, threaded=True)
+
 
 
