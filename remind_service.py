@@ -11,6 +11,9 @@ from dateutil.relativedelta import relativedelta
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, request, jsonify
+import openai
+import json
+from tenacity import retry, stop_after_attempt, wait_fixed
 
 app = Flask(__name__)
 
@@ -22,6 +25,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 SELF_URL = os.getenv("SELF_URL", "").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
 TZ = pytz.timezone(TIMEZONE)
@@ -720,6 +724,197 @@ def job_daily():
     global LAST_TASKS
     LAST_TASKS = [p.get("id") for p in tasks if p and isinstance(p, dict)]
 
+    # ================== AI PLANNING – MENTOR MODE ==================
+    if GOALS_DB and OPENAI_API_KEY:
+        openai.api_key = OPENAI_API_KEY
+        goals = notion_query(GOALS_DB) or []
+        ai_plan_summaries = []
+
+        # ---------- GPT CALL ----------
+        @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+        def call_gpt(messages):
+            resp = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=messages,
+                temperature=0.25,
+                max_tokens=500
+            )
+            return resp.choices[0].message.content.strip()
+
+        # ---------- WORKLOAD SNAPSHOT ----------
+        today = datetime.now(TZ).date()
+        week_start = today - datetime.timedelta(days=today.weekday())
+        week_end = week_start + datetime.timedelta(days=13)
+
+        current_tasks = notion_query(
+            REMIND_DB,
+            {
+                "and": [
+                    {"property": PROP_DONE, "checkbox": {"equals": False}},
+                    {"property": PROP_DUE, "date": {"on_or_after": week_start.isoformat()}},
+                    {"property": PROP_DUE, "date": {"on_or_before": week_end.isoformat()}}
+                ]
+            }
+        ) or []
+
+        tasks_by_day = {}
+        overdue_count = 0
+        high_priority_count = 0
+        task_titles = []
+
+        for t in current_tasks:
+            due_dt = get_date_start(t, PROP_DUE)
+            if not due_dt:
+                continue
+
+            d = due_dt.date()
+            key = d.strftime("%d/%m")
+            tasks_by_day[key] = tasks_by_day.get(key, 0) + 1
+
+            pri = get_select_name(t, PROP_PRIORITY) or "TB"
+            if pri == "Cao":
+                high_priority_count += 1
+            if d < today:
+                overdue_count += 1
+
+            task_titles.append(get_title(t).lower())
+
+        avg_tasks_per_day = (
+            sum(tasks_by_day.values()) / max(len(tasks_by_day), 1)
+            if tasks_by_day else 0
+        )
+
+        # ---------- AI GATE (QUYẾT ĐỊNH Ở CODE) ----------
+        if overdue_count >= 2:
+            lines.append("🤖 AI tạm dừng: đang có task quá hạn – ưu tiên dọn backlog.")
+            return
+
+        if high_priority_count >= 3:
+            lines.append("🤖 AI tạm dừng: quá nhiều task ưu tiên Cao.")
+            return
+
+        if avg_tasks_per_day > 5:
+            lines.append("🤖 AI tạm dừng: tải công việc tuần này quá cao.")
+            return
+
+        # ---------- SCHEDULE SUMMARY ----------
+        schedule_summary = "\n".join(
+            [f"- {d}: {c} task" for d, c in sorted(tasks_by_day.items())]
+        ) or "Lịch hiện tại khá trống."
+
+        # ---------- PER GOAL ----------
+        for goal in goals:
+            ginfo = read_goal_properties(goal)
+
+            if ginfo.get("progress_pct", 0) >= 100 or ginfo.get("trang_thai") in ("Done", "Hoàn thành"):
+                continue
+
+            # ----- SYSTEM + USER PROMPT -----
+            system_msg = {
+                "role": "system",
+                "content": (
+                    "You are a world-class personal planning mentor. "
+                    "You think in 80/20, critical path, and deep work. "
+                    "Return VALID JSON ONLY."
+                )
+            }
+
+            user_msg = {
+                "role": "user",
+                "content": f"""
+    Bạn là chuyên gia lập kế hoạch cá nhân cấp cao nhất thế giới
+    (James Clear + Cal Newport + Greg McKeown).
+
+    LỊCH 2 TUẦN TỚI:
+    {schedule_summary}
+
+    TẢI CÔNG VIỆC:
+    - Task quá hạn: {overdue_count}
+    - Task ưu tiên Cao: {high_priority_count}
+    - Trung bình task/ngày: {avg_tasks_per_day:.1f}
+
+    MỤC TIÊU:
+    - Tên: {ginfo['title']}
+    - Tiến độ: {ginfo.get('progress_pct', 0)}%
+    - Deadline: {format_dt(ginfo.get('ngay_hoan_thanh')) or "Chưa rõ"}
+    - Còn lại: {ginfo.get('days_remaining_computed', 'không rõ')} ngày
+
+    NHIỆM VỤ:
+    1. Xác định CRITICAL BOTTLENECK
+    2. Quyết định CÓ NÊN tạo task tuần này không
+    3. Nếu có → tối đa 2 task, impact cao – effort thấp
+    4. Task làm được trong 30–60 phút
+    5. Deadline trong 7 ngày tới
+    6. Nếu không nên tạo → tasks = []
+
+    FORMAT JSON:
+    {{
+    "goal": "{ginfo['title']}",
+    "critical_bottleneck": "...",
+    "tasks": [
+        {{
+        "name": "...",
+        "due": "YYYY-MM-DD",
+        "priority": "Cao/TB/Thấp",
+        "expected_outcome": "...",
+        "best_time": "Sáng sớm/Tối muộn/Linh hoạt",
+        "note": "Lý do 80/20 + mẹo làm nhanh"
+        }}
+    ],
+    "summary": "Vì sao tạo hoặc không tạo task"
+    }}
+    """
+            }
+
+            try:
+                raw = call_gpt([system_msg, user_msg])
+                plan = json.loads(raw)
+
+                created = 0
+
+                for t in plan.get("tasks", []):
+                    name = t["name"].strip()
+                    if name.lower() in task_titles:
+                        continue
+
+                    due = t["due"]
+                    if not due:
+                        continue
+
+                    props = {
+                        PROP_TITLE: {"title": [{"text": {"content": name}}]},
+                        PROP_DUE: {"date": {"start": due}},
+                        PROP_PRIORITY: {"select": {"name": t.get("priority", "TB")}},
+                        PROP_NOTE: {"rich_text": [{"text": {"content": t.get("note", "")}}]},
+                        PROP_DONE: {"checkbox": False},
+                        PROP_REL_GOAL: {"relation": [{"id": goal["id"]}]}
+                    }
+
+                    if PROP_ACTIVE:
+                        props[PROP_ACTIVE] = {"checkbox": True}
+
+                    if notion_create_page(REMIND_DB, props):
+                        created += 1
+
+                ai_plan_summaries.append(
+                    f"🎯 <b>{plan['goal']}</b>\n"
+                    f"→ AI tạo <b>{created}</b> task\n"
+                    f"🧠 {plan.get('critical_bottleneck','')}\n"
+                    f"💭 {plan.get('summary','')}"
+                )
+
+            except Exception as e:
+                print(f"[AI ERROR] {ginfo['title']}: {e}")
+
+        if ai_plan_summaries:
+            lines.append("")
+            lines.append("🤖 <b>AI ĐIỀU PHỐI CÔNG VIỆC TUẦN NÀY</b>")
+            lines.extend(ai_plan_summaries)
+            lines.append("\nTask mới đã vào Notion – dùng /check để xem.")
+
+    # ================== END AI PLANNING ==================
+
+
 def _parse_completed_datetime_from_page(page):
     """
     Try multiple ways to get completed datetime from a page:
@@ -896,16 +1091,10 @@ def webhook():
     global LAST_TASKS
     try:
         update = request.get_json(silent=True) or {}
-        if "message" not in update:
-            return jsonify({"ok": True}), 200
-
         message = update.get("message", {}) or {}
         chat_id = str(message.get("chat", {}).get("id", ""))
-
-        # 2️⃣ Ignore chat khác NHƯNG LUÔN TRẢ 200 (TUYỆT ĐỐI KHÔNG 403)
-        if TELEGRAM_CHAT_ID and chat_id and chat_id != TELEGRAM_CHAT_ID:
-            print("[DBG] Ignored update from other chat:", chat_id)
-            return jsonify({"ok": True}), 200
+        if TELEGRAM_CHAT_ID and chat_id != TELEGRAM_CHAT_ID:
+            return jsonify({"ok": False, "error": "forbidden chat id"}), 403
         text = (message.get("text", "") or "").strip()
         if not text.startswith("/"):
             return jsonify({"ok": True}), 200
@@ -964,7 +1153,7 @@ def webhook():
                         title = get_title(p)
                         pri = get_select_name(p, PROP_PRIORITY) or ""
                         sym = priority_emoji(pri)
-                        note_text = get_note_text(p)                   
+                        note_text = get_note_text(p)
                         # due date/time
                         due_dt = None
                         try:
@@ -1153,8 +1342,7 @@ def debug_run_weekly():
     if MANUAL_TRIGGER_SECRET:
         token = request.args.get("token", "") or request.headers.get("X-Run-Token", "")
         if token != MANUAL_TRIGGER_SECRET:
-            return jsonify({"ok": True}), 200
-
+            return jsonify({"error": "forbidden"}), 403
     try:
         job_weekly()
         return jsonify({"ok": True, "msg": "job_weekly executed"}), 200
@@ -1166,8 +1354,7 @@ def debug_run_monthly():
     if MANUAL_TRIGGER_SECRET:
         token = request.args.get("token", "") or request.headers.get("X-Run-Token", "")
         if token != MANUAL_TRIGGER_SECRET:
-            return jsonify({"ok": True}), 200
-
+            return jsonify({"error": "forbidden"}), 403
     try:
         job_monthly()
         return jsonify({"ok": True, "msg": "job_monthly executed"}), 200
@@ -1287,5 +1474,3 @@ if __name__ == "__main__":
         port = int(os.getenv("PORT", 5000))
         print(f"Starting Flask server on port {port} for webhook mode.")
         app.run(host="0.0.0.0", port=port, threaded=True)
-
-
