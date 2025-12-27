@@ -5,4 +5,5 @@ pytz
 apscheduler
 gunicorn
 PYREQ
+tenacity
 openai>=1.0.0
