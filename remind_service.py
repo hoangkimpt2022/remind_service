@@ -1147,7 +1147,8 @@ def debug_run_weekly():
     if MANUAL_TRIGGER_SECRET:
         token = request.args.get("token", "") or request.headers.get("X-Run-Token", "")
         if token != MANUAL_TRIGGER_SECRET:
-            return jsonify({"error": "forbidden"}), 403
+            return jsonify({"ok": True}), 200
+
     try:
         job_weekly()
         return jsonify({"ok": True, "msg": "job_weekly executed"}), 200
@@ -1159,7 +1160,8 @@ def debug_run_monthly():
     if MANUAL_TRIGGER_SECRET:
         token = request.args.get("token", "") or request.headers.get("X-Run-Token", "")
         if token != MANUAL_TRIGGER_SECRET:
-            return jsonify({"error": "forbidden"}), 403
+            return jsonify({"ok": True}), 200
+
     try:
         job_monthly()
         return jsonify({"ok": True, "msg": "job_monthly executed"}), 200
@@ -1279,6 +1281,5 @@ if __name__ == "__main__":
         port = int(os.getenv("PORT", 5000))
         print(f"Starting Flask server on port {port} for webhook mode.")
         app.run(host="0.0.0.0", port=port, threaded=True)
-
 
 
