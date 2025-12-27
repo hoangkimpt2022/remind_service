@@ -896,10 +896,16 @@ def webhook():
     global LAST_TASKS
     try:
         update = request.get_json(silent=True) or {}
+        if "message" not in update:
+            return jsonify({"ok": True}), 200
+
         message = update.get("message", {}) or {}
         chat_id = str(message.get("chat", {}).get("id", ""))
-        if TELEGRAM_CHAT_ID and chat_id != TELEGRAM_CHAT_ID:
-            return jsonify({"ok": False, "error": "forbidden chat id"}), 403
+
+        # 2️⃣ Ignore chat khác NHƯNG LUÔN TRẢ 200 (TUYỆT ĐỐI KHÔNG 403)
+        if TELEGRAM_CHAT_ID and chat_id and chat_id != TELEGRAM_CHAT_ID:
+            print("[DBG] Ignored update from other chat:", chat_id)
+            return jsonify({"ok": True}), 200
         text = (message.get("text", "") or "").strip()
         if not text.startswith("/"):
             return jsonify({"ok": True}), 200
