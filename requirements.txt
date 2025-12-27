@@ -5,3 +5,4 @@ pytz
 apscheduler
 gunicorn
 PYREQ
+openai>=1.0.0
