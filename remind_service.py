@@ -417,6 +417,37 @@ def read_goal_properties(goal_page):
 
     out["progress_pct"] = progress_pct
     return out
+def pick_top_goal(goals):
+    """
+    Ưu tiên:
+    1. Status = In progress
+    2. Có ngày hoàn thành gần nhất
+    3. Progress < 100
+    """
+    candidates = []
+
+    today = datetime.datetime.now(TZ).date()
+
+    for g in goals:
+        ginfo = read_goal_properties(g)
+        if ginfo.get("progress_pct") is None:
+            continue
+        if ginfo.get("progress_pct") >= 100:
+            continue
+
+        end_date = ginfo.get("ngay_hoan_thanh")
+        days_left = (
+            (end_date - today).days
+            if end_date else 9999
+        )
+
+        candidates.append((days_left, ginfo))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0][1]
 
 def _parse_completed_datetime_from_page(page):
     dt = get_date_start(page, PROP_COMPLETED)
@@ -769,43 +800,11 @@ def job_weekly():
     print("[2/6] Phân tích mục tiêu...")
     
     goals = notion_query(GOALS_DB) or []
-    top_goal = None
-    
-def pick_top_goal(goals):
-    """
-    Ưu tiên:
-    1. Status = In progress
-    2. Có ngày hoàn thành gần nhất
-    3. Progress < 100
-    """
-    candidates = []
-
-    today = datetime.datetime.now(TZ).date()
-
-    for g in goals:
-        ginfo = read_goal_properties(g)
-        if ginfo.get("progress_pct") is None:
-            continue
-        if ginfo.get("progress_pct") >= 100:
-            continue
-
-        end_date = ginfo.get("ngay_hoan_thanh")
-        days_left = (
-            (end_date - today).days
-            if end_date else 9999
-        )
-
-        candidates.append((days_left, ginfo))
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda x: x[0])
-    return candidates[0][1]
-
+    top_goal = pick_top_goal(goals)
     
     if not top_goal:
-        top_goal = pick_top_goal(goals)
+        print("[WARN] Không tìm thấy goal phù hợp.")
+        return
 
     progress_pct = int(top_goal.get("progress_pct", 0))
     done_tasks_week = top_goal.get("nhiem_vu_hoan_tuan_rollup", 0)
