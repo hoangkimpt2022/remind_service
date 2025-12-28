@@ -494,7 +494,7 @@ def extract_prop_text(props: dict, key_like: str) -> str:
 # ============================================================================
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-def call_gpt(messages, model=""gpt-4o-mini"", temperature=0.7, max_tokens=2000):
+def call_gpt(messages, model="gpt-4o-mini", temperature=0.7, max_tokens=2000):
     """Gọi GPT với retry logic"""
     if not OPENAI_API_KEY:
         return "AI không khả dụng - thiếu OPENAI_API_KEY"
@@ -1536,3 +1536,4 @@ if __name__ == "__main__":
         port = int(os.getenv("PORT", 5000))
         print(f"Starting Flask server on port {port}.")
         app.run(host="0.0.0.0", port=port, threaded=True)
+
