@@ -1326,30 +1326,40 @@ def webhook():
             return jsonify({"ok": True}), 200
 
         elif text.lower().startswith("/done."):
-            task_list = LAST_TASKS.get(chat_id, [])
+            parts = text.split(".", 1)
+
+            if len(parts) < 2 or not parts[1].strip().isdigit():
+                send_telegram("❌ Số không hợp lệ. Gõ /done.<số> (ví dụ /done.1).")
+                return jsonify({"ok": True}), 200
+
             n = int(parts[1].strip())
+
+            task_list = LAST_TASKS.get(chat_id, [])
+
             if n < 1 or n > len(task_list):
                 send_telegram("❌ Số không hợp lệ. Gõ /check để xem danh sách.")
                 return jsonify({"ok": True}), 200
 
             page_id = task_list[n - 1]
 
-                send_telegram("❌ Số không hợp lệ. Gõ /check để xem danh sách.")
-                return jsonify({"ok": True}), 200
-            page_id = LAST_TASKS[n - 1]
             now_iso = datetime.datetime.now(TZ).isoformat()
+
             props = {PROP_DONE: {"checkbox": True}}
             if PROP_COMPLETED:
                 props[PROP_COMPLETED] = {"date": {"start": now_iso}}
+
             notion_update_page(page_id, props)
+
             title = ""
             try:
                 p = req_get(f"/pages/{page_id}")
                 title = get_title(p)
-            except:
+            except Exception:
                 title = ""
+
             send_telegram(f"✅ Đã đánh dấu Done cho nhiệm vụ số {n}. {title}")
             return jsonify({"ok": True}), 200
+
 
         elif text.lower().startswith("/new."):
             payload = text[5:]
@@ -1536,5 +1546,3 @@ if __name__ == "__main__":
         port = int(os.getenv("PORT", 5000))
         print(f"Starting Flask server on port {port}.")
         app.run(host="0.0.0.0", port=port, threaded=True)
-
-
