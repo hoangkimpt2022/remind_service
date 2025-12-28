@@ -771,7 +771,7 @@ def job_weekly():
     goals = notion_query(GOALS_DB) or []
     top_goal = None
     
-    def pick_top_goal(goals):
+def pick_top_goal(goals):
     """
     Ưu tiên:
     1. Status = In progress
@@ -1536,4 +1536,5 @@ if __name__ == "__main__":
         port = int(os.getenv("PORT", 5000))
         print(f"Starting Flask server on port {port}.")
         app.run(host="0.0.0.0", port=port, threaded=True)
+
 
