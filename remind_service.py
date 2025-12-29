@@ -145,7 +145,19 @@ def overdue_days(page):
         return None
     today = datetime.datetime.now(TZ).date()
     return (today - due_dt.date()).days
-
+    
+def render_progress_bar(percent, total_blocks=10):
+    """
+    Render progress bar dạng text.
+    Ví dụ: 60% → ██████░░░░
+    """
+    try:
+        percent = max(0, min(100, int(percent)))
+        filled = round(percent / 100 * total_blocks)
+        return "█" * filled + "░" * (total_blocks - filled)
+    except Exception:
+        return "░" * total_blocks
+        
 def _parse_completed_datetime_from_page(page):
     """
     Lấy ngày hoàn thành (Completed date) từ Notion page.
@@ -1383,3 +1395,4 @@ if __name__ == "__main__":
         print(f"🌐 Starting Flask server on port {port}")
         print("="*70 + "\n")
         app.run(host="0.0.0.0", port=port, threaded=True)
+
