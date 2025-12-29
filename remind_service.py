@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# remind_service_full.py - Enhanced with Deep AI Planning & Mentoring
+# remind_service_full.py - FIXED VERSION với AI luôn chạy
 # Requirements: pip install flask requests python-dateutil pytz apscheduler openai tenacity
 
 import os
@@ -28,9 +28,7 @@ GOALS_DB = os.getenv("GOALS_NOTION_DATABASE", "").strip()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
-SELF_URL = os.getenv("SELF_URL", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-ENABLE_AI = os.getenv("ENABLE_AI", "true").lower() in ("1", "true", "yes")
 
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
 TZ = pytz.timezone(TIMEZONE)
@@ -39,14 +37,13 @@ REMIND_HOUR = int(os.getenv("REMIND_HOUR", "14"))
 REMIND_MINUTE = int(os.getenv("REMIND_MINUTE", "0"))
 WEEKLY_HOUR = int(os.getenv("WEEKLY_HOUR", "20"))
 MONTHLY_HOUR = int(os.getenv("MONTHLY_HOUR", "8"))
-RUN_ON_START = os.getenv("RUN_ON_START", "true").lower() in ("1", "true", "yes")
+RUN_ON_START = os.getenv("RUN_ON_START", "false").lower() in ("1", "true", "yes")
 
 HEADERS = {
     "Notion-Version": "2022-06-28",
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {NOTION_TOKEN}"
 }
-if NOTION_TOKEN:
-    HEADERS["Authorization"] = f"Bearer {NOTION_TOKEN}"
 
 # Property names
 PROP_TITLE = os.getenv("PROP_TITLE", "Aa name")
@@ -71,43 +68,22 @@ GOAL_PROP_REMAIN = "Nhiệm vụ còn lại"
 GOAL_PROP_DONE_WEEK = "Nhiệm vụ hoàn thành tuần này"
 GOAL_PROP_DONE_MONTH = "Nhiệm vụ hoàn thành tháng này"
 
-# Lưu LAST_TASKS theo chat_id để tránh lệch trạng thái
-LAST_TASKS = {}  # {chat_id: [page_id, ...]}
+LAST_TASKS = {}
 
-print(f"[CONFIG] GOALS_DB={GOALS_DB[:8]}... REMIND_DB={REMIND_DB[:8]}...")
+print(f"[CONFIG] OpenAI API: {'✓' if OPENAI_API_KEY else '✗'}")
+print(f"[CONFIG] GOALS_DB: {GOALS_DB[:8] if GOALS_DB else 'NOT SET'}...")
+print(f"[CONFIG] REMIND_DB: {REMIND_DB[:8] if REMIND_DB else 'NOT SET'}...")
 
 # ============================================================================
 # NOTION HELPERS
 # ============================================================================
-def req_get(path):
-    url = f"https://api.notion.com/v1{path}"
-    r = requests.get(url, headers=HEADERS, timeout=20)
-    r.raise_for_status()
-    return r.json()
-
-def req_post(path, json_payload):
-    url = f"https://api.notion.com/v1{path}"
-    r = requests.post(url, headers=HEADERS, json=json_payload, timeout=20)
-    r.raise_for_status()
-    return r.json()
-
-def req_patch(path, json_payload):
-    url = f"https://api.notion.com/v1{path}"
-    r = requests.patch(url, headers=HEADERS, json=json_payload, timeout=20)
-    r.raise_for_status()
-    return r.json()
-
 def notion_query(db_id, filter_payload=None, page_size=100):
     if not db_id:
         return []
     url = f"https://api.notion.com/v1/databases/{db_id}/query"
     payload = {"page_size": page_size}
     if filter_payload:
-        if isinstance(filter_payload, dict):
-            if "and" in filter_payload or "filter" in filter_payload or "or" in filter_payload:
-                payload.update({"filter": filter_payload} if "filter" not in filter_payload else filter_payload)
-            else:
-                payload["filter"] = filter_payload
+        payload["filter"] = filter_payload
     try:
         r = requests.post(url, headers=HEADERS, json=payload, timeout=20)
         if r.status_code != 200:
@@ -118,93 +94,81 @@ def notion_query(db_id, filter_payload=None, page_size=100):
         print(f"[ERROR] notion_query: {e}")
         return []
 
-def notion_create_page(db_id, properties):
-    try:
-        return req_post("/pages", {"parent": {"database_id": db_id}, "properties": properties})
-    except Exception as e:
-        print(f"[ERROR] create page: {e}")
-        return None
-
 def notion_update_page(page_id, properties):
     try:
-        return req_patch(f"/pages/{page_id}", {"properties": properties})
+        url = f"https://api.notion.com/v1/pages/{page_id}"
+        r = requests.patch(url, headers=HEADERS, json={"properties": properties}, timeout=20)
+        r.raise_for_status()
+        return r.json()
     except Exception as e:
         print(f"[ERROR] update page: {e}")
+        return None
+
+def notion_create_page(db_id, properties):
+    try:
+        url = "https://api.notion.com/v1/pages"
+        r = requests.post(url, headers=HEADERS, json={"parent": {"database_id": db_id}, "properties": properties}, timeout=20)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"[ERROR] create page: {e}")
         return None
 
 # ============================================================================
 # UTILITY HELPERS
 # ============================================================================
-def format_dt(dt_obj):
-    if not dt_obj:
-        return ""
-    if isinstance(dt_obj, datetime.date) and not isinstance(dt_obj, datetime.datetime):
-        return dt_obj.strftime("%d/%m/%Y")
-    try:
-        if dt_obj.tzinfo is None:
-            dt = TZ.localize(dt_obj)
-        else:
-            dt = dt_obj.astimezone(TZ)
-        return dt.strftime("%d/%m/%Y %H:%M")
-    except:
-        return str(dt_obj)
-
 def get_title(page):
-    p = page.get("properties", {}).get(PROP_TITLE)
-    if p and p.get("type") == "title":
-        return "".join([t.get("plain_text", "") for t in p.get("title", [])])
     for v in page.get("properties", {}).values():
-        if v.get("type") == "title":
+        if v.get("type") == "title" and v.get("title"):
             return "".join([t.get("plain_text", "") for t in v.get("title", [])])
     return "Untitled"
 
-def get_note_text(page):
-    if not PROP_NOTE:
-        return ""
-    prop = page.get("properties", {}).get(PROP_NOTE, {})
-    if prop.get("type") == "rich_text":
-        return extract_plain_text_from_rich_text(prop.get("rich_text", []))
-    return ""
-
 def get_checkbox(page, prop_name):
-    if not prop_name:
-        return False
     return bool(page.get("properties", {}).get(prop_name, {}).get("checkbox", False))
 
 def get_select_name(page, prop_name):
-    if not prop_name:
-        return ""
-    val = page.get("properties", {}).get(prop_name, {})
-    sel = val.get("select")
-    if sel and isinstance(sel, dict):
-        return sel.get("name", "")
-    return ""
+    sel = page.get("properties", {}).get(prop_name, {}).get("select")
+    return sel.get("name", "") if sel else ""
 
 def get_date_start(page, prop_name):
-    if not prop_name:
-        return None
     raw = page.get("properties", {}).get(prop_name, {}).get("date", {}).get("start")
-    if not raw:
-        return None
-    try:
-        return dateparser.parse(raw)
-    except:
-        return None
-
-def get_relation_ids(page, prop_name):
-    if not prop_name:
-        return []
-    rels = page.get("properties", {}).get(prop_name, {}).get("relation", []) or []
-    return [r.get("id") for r in rels if r.get("id")]
+    if raw:
+        try:
+            return dateparser.parse(raw)
+        except:
+            pass
+    return None
 
 def overdue_days(page):
     due_dt = get_date_start(page, PROP_DUE)
     if not due_dt:
         return None
     today = datetime.datetime.now(TZ).date()
+    return (today - due_dt.date()).days
+
+def _parse_completed_datetime_from_page(page):
+    """
+    Lấy ngày hoàn thành (Completed date) từ Notion page.
+    Trả về datetime/date hoặc None nếu không có.
+    """
     try:
-        return (today - due_dt.date()).days
-    except:
+        raw = (
+            page
+            .get("properties", {})
+            .get(PROP_COMPLETED, {})
+            .get("date", {})
+            .get("start")
+        )
+        if not raw:
+            return None
+
+        # Dùng dateutil nếu có, fallback sang datetime
+        try:
+            return dateparser.parse(raw)
+        except Exception:
+            return datetime.datetime.fromisoformat(raw)
+
+    except Exception:
         return None
 
 def week_range(date_obj):
@@ -212,27 +176,18 @@ def week_range(date_obj):
     end = start + datetime.timedelta(days=6)
     return start, end
 
-def month_range(date_obj):
-    first = date_obj.replace(day=1)
-    last = (first + relativedelta(months=1) - datetime.timedelta(days=1))
-    return first, last
-
 def send_telegram(text):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print(f"[TELEGRAM DISABLED]\n{text}\n")
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        response = requests.post(
-            url,
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True
-            },
-            timeout=10
-        )
+        response = requests.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }, timeout=10)
         return response.status_code == 200
     except Exception as e:
         print(f"[ERROR] Telegram: {e}")
@@ -240,644 +195,570 @@ def send_telegram(text):
 
 def send_telegram_long(text):
     max_len = 3800
-    parts = [text[i:i+max_len] for i in range(0, len(text), max_len)]
-    for part in parts:
-        send_telegram(part)
+    for i in range(0, len(text), max_len):
+        send_telegram(text[i:i+max_len])
         time.sleep(0.5)
 
-def render_progress_bar(percent, length=18):
-    try:
-        pct = int(round(float(percent)))
-    except:
-        pct = 0
-    pct = max(0, min(100, pct))
-    filled_len = int(round(length * pct / 100))
-    bar = "█" * filled_len + "░" * (length - filled_len)
-    return f"[{bar}] {pct}%"
-
 def priority_emoji(priority: str) -> str:
-    if not priority:
-        return "🟡"
-    p = priority.strip().lower()
-    if p == "cao":
-        return "🔴"
-    if p in ("tb", "trung bình"):
-        return "🟡"
-    if p == "thấp":
-        return "🟢"
+    p = (priority or "").strip().lower()
+    if p == "cao": return "🔴"
+    if p in ("tb", "trung bình"): return "🟡"
+    if p == "thấp": return "🟢"
     return "🟡"
 
 # ============================================================================
 # GOAL HELPERS
 # ============================================================================
-def extract_plain_text_from_rich_text(rich):
-    if not rich:
-        return ""
+def extract_plain_text(rich):
+    if not rich: return ""
     return "".join(part.get("plain_text","") for part in rich)
 
-def find_prop_key(props: dict, key_like: str):
-    if not props or not key_like:
-        return None
-    if key_like in props:
-        return key_like
+def find_prop_key(props, key_like):
+    if key_like in props: return key_like
     low = key_like.lower()
     for k in props.keys():
-        if k.lower() == low:
-            return k
-    for k in props.keys():
-        if low in k.lower():
+        if k.lower() == low or low in k.lower():
             return k
     return None
 
-def safe_select(props: dict, name: str):
+def safe_formula(props, name):
     k = find_prop_key(props, name)
-    if not k:
-        return None
-    v = props.get(k, {})
-    sel = v.get("select")
-    if sel and isinstance(sel, dict):
-        return sel.get("name")
+    if not k: return None
+    f = props.get(k, {}).get("formula", {})
+    if f.get("string") is not None: return f["string"]
+    if f.get("number") is not None: return f["number"]
     return None
 
-def safe_date(props: dict, name: str):
+def safe_rollup(props, name):
     k = find_prop_key(props, name)
-    if not k:
-        return None
-    raw = props.get(k, {}).get("date", {}).get("start")
-    if not raw:
-        return None
-    try:
-        return dateparser.parse(raw).date()
-    except:
-        return None
-
-def safe_formula(props: dict, name: str):
-    k = find_prop_key(props, name)
-    if not k:
-        return None
-    f = props.get(k, {}).get("formula")
-    if not f:
-        return None
-    if "string" in f and f.get("string") is not None:
-        return f.get("string")
-    if "number" in f and f.get("number") is not None:
-        return f.get("number")
-    if "date" in f and f.get("date") is not None:
-        try:
-            return dateparser.parse(f.get("date").get("start")).date()
-        except:
-            return None
-    return None
-
-def safe_rollup_number(props: dict, name: str):
-    k = find_prop_key(props, name)
-    if not k:
-        return None
-    ru = props.get(k, {}).get("rollup")
-    if not ru:
-        return None
-    if ru.get("number") is not None:
-        return ru.get("number")
-    arr = ru.get("array") or []
+    if not k: return None
+    ru = props.get(k, {}).get("rollup", {})
+    if ru.get("number") is not None: return ru["number"]
+    arr = ru.get("array", [])
     return len(arr) if isinstance(arr, list) else None
 
-def read_goal_properties(goal_page):
-    """Đọc properties của goal page"""
-    out = {
-        "id": "",
-        "title": "(no title)",
-        "trang_thai": None,
-        "ngay_bat_dau": None,
-        "ngay_hoan_thanh": None,
-        "dem_nguoc_formula": None,
-        "tien_do_formula": None,
-        "tong_nhiem_vu_rollup": None,
-        "nhiem_vu_da_hoan_rollup": None,
-        "nhiem_vu_con_lai_formula": None,
-        "nhiem_vu_hoan_tuan_rollup": None,
-        "nhiem_vu_hoan_thang_rollup": None,
-        "days_remaining_computed": None,
-        "progress_pct": None
-    }
-
-    if not goal_page or not isinstance(goal_page, dict):
-        return out
-
-    props = goal_page.get("properties", {}) or {}
-    out["id"] = goal_page.get("id", "") or ""
-    
-    title = ""
-    for k, v in props.items():
-        if v.get("type") == "title":
-            title = extract_plain_text_from_rich_text(v.get("title", []))
-            break
-    out["title"] = title or get_title(goal_page) or out["id"]
-
-    out["trang_thai"] = safe_select(props, GOAL_PROP_STATUS)
-    out["ngay_bat_dau"] = safe_date(props, GOAL_PROP_START)
-    out["ngay_hoan_thanh"] = safe_date(props, GOAL_PROP_END)
-    out["dem_nguoc_formula"] = safe_formula(props, GOAL_PROP_COUNTDOWN)
-    out["tien_do_formula"] = safe_formula(props, GOAL_PROP_PROGRESS)
-    out["tong_nhiem_vu_rollup"] = safe_rollup_number(props, GOAL_PROP_TOTAL_TASKS)
-    out["nhiem_vu_da_hoan_rollup"] = safe_rollup_number(props, GOAL_PROP_DONE_TASKS)
-    out["nhiem_vu_con_lai_formula"] = safe_formula(props, GOAL_PROP_REMAIN)
-    out["nhiem_vu_hoan_tuan_rollup"] = safe_rollup_number(props, GOAL_PROP_DONE_WEEK)
-    out["nhiem_vu_hoan_thang_rollup"] = safe_rollup_number(props, GOAL_PROP_DONE_MONTH)
-
-    if out.get("dem_nguoc_formula") is None and out.get("ngay_hoan_thanh"):
+def safe_date(props, name):
+    k = find_prop_key(props, name)
+    if not k: return None
+    raw = props.get(k, {}).get("date", {}).get("start")
+    if raw:
         try:
-            today = datetime.datetime.now(TZ).date()
-            out["days_remaining_computed"] = (out["ngay_hoan_thanh"] - today).days
+            return dateparser.parse(raw).date()
         except:
-            out["days_remaining_computed"] = None
-
-    # Normalize progress
-    progress_pct = None
-    raw_prog = out.get("tien_do_formula")
-    if raw_prog is not None:
-        try:
-            s = str(raw_prog).strip()
-            if s.endswith("%"):
-                s = s[:-1].strip()
-            val = float(s)
-            if val <= 1:
-                val = val * 100
-            progress_pct = int(round(val))
-        except:
-            progress_pct = None
-
-    if progress_pct is None:
-        try:
-            total = out.get("tong_nhiem_vu_rollup")
-            done = out.get("nhiem_vu_da_hoan_rollup")
-            if total and (done is not None):
-                progress_pct = int(round(float(done) / float(total) * 100)) if total > 0 else 0
-        except:
-            progress_pct = None
-
-    out["progress_pct"] = progress_pct
-    return out
-def pick_top_goal(goals):
-    """
-    Ưu tiên:
-    1. Status = In progress
-    2. Có ngày hoàn thành gần nhất
-    3. Progress < 100
-    """
-    candidates = []
-
-    today = datetime.datetime.now(TZ).date()
-
-    for g in goals:
-        ginfo = read_goal_properties(g)
-        if ginfo.get("progress_pct") is None:
-            continue
-        if ginfo.get("progress_pct") >= 100:
-            continue
-
-        end_date = ginfo.get("ngay_hoan_thanh")
-        days_left = (
-            (end_date - today).days
-            if end_date else 9999
-        )
-
-        candidates.append((days_left, ginfo))
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda x: x[0])
-    return candidates[0][1]
-
-def _parse_completed_datetime_from_page(page):
-    dt = get_date_start(page, PROP_COMPLETED)
-    if dt:
-        return dt
-    try:
-        props = page.get("properties", {}) or {}
-        s = extract_prop_text(props, PROP_COMPLETED)
-        if s:
-            return dateparser.parse(s)
-    except:
-        pass
+            pass
     return None
 
-def extract_prop_text(props: dict, key_like: str) -> str:
-    if not props or not key_like:
-        return ""
-    k = find_prop_key(props, key_like)
-    if not k:
-        return ""
-    prop = props.get(k, {}) or {}
-    ptype = prop.get("type")
-    if ptype == "formula":
-        formula = prop.get("formula", {})
-        if formula.get("string") is not None:
-            return str(formula.get("string"))
-        if formula.get("number") is not None:
-            return str(formula.get("number"))
-        if formula.get("boolean") is not None:
-            return "1" if formula.get("boolean") else "0"
-        if formula.get("date"):
-            return formula["date"].get("start", "") or ""
-        return ""
-    if ptype == "rollup":
-        roll = prop.get("rollup", {})
-        if roll.get("number") is not None:
-            return str(roll.get("number"))
-        arr = roll.get("array") or []
-        if arr:
-            first = arr[0]
-            if isinstance(first, dict):
-                if first.get("id"):
-                    return first.get("id")
-                if "title" in first:
-                    return extract_plain_text_from_rich_text(first.get("title", []))
-                if "plain_text" in first:
-                    return first.get("plain_text", "")
-            return str(first)
-        return ""
-    if ptype == "title":
-        return extract_plain_text_from_rich_text(prop.get("title", [])) or ""
-    if ptype == "rich_text":
-        return extract_plain_text_from_rich_text(prop.get("rich_text", [])) or ""
-    if ptype == "number":
-        return "" if prop.get("number") is None else str(prop.get("number"))
-    if ptype == "date":
-        d = prop.get("date", {}) or {}
-        return d.get("start", "") or ""
-    if ptype == "checkbox":
-        return "1" if prop.get("checkbox") else "0"
-    if ptype == "select":
-        sel = prop.get("select") or {}
-        return sel.get("name", "") or ""
-    if ptype == "multi_select":
-        arr = prop.get("multi_select") or []
-        return ", ".join(a.get("name", "") for a in arr)
-    if ptype == "relation":
-        rel = prop.get("relation") or []
-        if rel:
-            return rel[0].get("id", "") or ""
-    return ""
+def read_goal_properties(goal_page):
+    out = {"id": goal_page.get("id", ""), "title": "Untitled"}
+    props = goal_page.get("properties", {})
+    
+    # Get title
+    for v in props.values():
+        if v.get("type") == "title":
+            out["title"] = extract_plain_text(v.get("title", []))
+            break
+    
+    out["ngay_hoan_thanh"] = safe_date(props, GOAL_PROP_END)
+    out["tong_nhiem_vu"] = safe_rollup(props, GOAL_PROP_TOTAL_TASKS) or 0
+    out["da_hoan_thanh"] = safe_rollup(props, GOAL_PROP_DONE_TASKS) or 0
+    out["hoan_tuan_nay"] = safe_rollup(props, GOAL_PROP_DONE_WEEK) or 0
+    
+    # Calculate progress
+    if out["tong_nhiem_vu"] > 0:
+        out["progress_pct"] = int(round(out["da_hoan_thanh"] / out["tong_nhiem_vu"] * 100))
+    else:
+        prog = safe_formula(props, GOAL_PROP_PROGRESS)
+        if prog:
+            try:
+                s = str(prog).replace("%", "").strip()
+                val = float(s)
+                out["progress_pct"] = int(val if val > 1 else val * 100)
+            except:
+                out["progress_pct"] = 0
+        else:
+            out["progress_pct"] = 0
+    
+    return out
 
 # ============================================================================
-# AI CORE ENGINE - PHÂN TÍCH SÂU & LẬP KẾ HOẠCH
+# AI ENGINE - LUÔN CHẠY, PHÂN TÍCH SÂU VÀ THỰC TẾ
 # ============================================================================
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-def call_gpt(messages, model="gpt-4o-mini", temperature=0.7, max_tokens=2000):
-    """Gọi GPT với retry logic"""
+def call_gpt(messages, temperature=0.75, max_tokens=2500):
+    """Gọi OpenAI GPT với retry"""
     if not OPENAI_API_KEY:
-        return "AI không khả dụng - thiếu OPENAI_API_KEY"
+        raise Exception("Missing OPENAI_API_KEY")
     
     openai.api_key = OPENAI_API_KEY
-    try:
-        resp = openai.ChatCompletion.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"[ERROR] call_gpt: {e}")
-        raise
+    resp = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens
+    )
+    return resp.choices[0].message.content.strip()
 
-def ai_deep_weekly_analysis(context):
+def ai_strategic_weekly_analysis(context):
     """
-    AI PHÂN TÍCH CHIẾN LƯỢC TUẦN
-    - Đánh giá thực trạng
-    - Phát hiện patterns & bottlenecks  
-    - Đưa ra chiến lược tuần tới
-    - Message động lực cá nhân hóa
+    AI PHÂN TÍCH CHIẾN LƯỢC - LUÔN CHẠY
+    Hiểu rõ: timeline, velocity, bottleneck, cách tối ưu
     """
     
-    prompt = f"""Bạn là chiến lược gia cá nhân, kết hợp tư duy analytics và empathy sâu sắc.
+    # Tính toán chi tiết
+    days_left = context['days_remaining']
+    weeks_left = max(1, ceil(days_left / 7))
+    tasks_left = context['tasks_remaining']
+    current_velocity = context['goal_velocity']
+    needed_velocity = context['required_velocity']
+    velocity_gap = needed_velocity - current_velocity
+    
+    # Phân loại tình huống
+    if completion := context['completion_rate']:
+        if completion >= 80:
+            situation = "MOMENTUM_EXCELLENT"
+        elif completion >= 60:
+            situation = "STEADY_PROGRESS"
+        elif completion >= 40:
+            situation = "STRUGGLING"
+        else:
+            situation = "CRITICAL"
+    else:
+        situation = "NO_DATA"
+    
+    prompt = f"""Bạn là strategic advisor cao cấp, chuyên về goal achievement và productivity optimization.
 
-📊 TÌNH HÌNH TUẦN VỪA QUA:
-• Tổng công việc: {context['total_tasks']}
+📊 TÌNH HÌNH THỰC TẾ:
+
+**Tuần vừa qua:**
+• Tổng tasks: {context['total_tasks']}
 • Hoàn thành đúng hạn: {context['completed_ontime']}
-• Hoàn thành trễ hạn: {context['completed_overdue']}
-• Quá hạn chưa làm: {context['overdue_unfinished']}
-• Tỷ lệ hoàn thành: {context['completion_rate']:.1f}%
+• Hoàn thành trễ: {context['completed_overdue']}
+• Quá hạn chưa xử lý: {context['overdue_unfinished']}
+• Completion rate: {context['completion_rate']:.1f}%
 
-🎯 MỤC TIÊU CHÍNH:
-• "{context['goal_title']}"
-• Tiến độ: {context['goal_progress']:.1f}% ({context['goal_done']}/{context['goal_total']})
-• Tốc độ tuần này: {context['goal_velocity']} tasks
-• Tốc độ cần thiết: {context['required_velocity']:.1f} tasks/tuần
+**Mục tiêu: "{context['goal_title']}"**
+• Progress: {context['goal_progress']}% ({context['goal_done']}/{context['goal_total']} tasks)
+• Còn lại: {tasks_left} tasks trong {days_left} ngày ({weeks_left} tuần)
+• Velocity tuần này: {current_velocity} tasks/tuần
+• Velocity cần thiết: {needed_velocity:.1f} tasks/tuần
+• GAP: {velocity_gap:+.1f} tasks/tuần {'⚠️ PHẢI TĂNG TỐC!' if velocity_gap > 0 else '✅ Đang đúng track'}
 
-📈 PHÂN BỔ CÔNG VIỆC:
+**Phân bổ workload:**
 {context['workload_distribution']}
 
-⚠️ VẤN ĐỀ PHÁT HIỆN:
+**Vấn đề phát hiện:**
 {context['detected_issues']}
+
+---
+
+NHIỆM VỤ CỦA BẠN:
+Phân tích sâu và đưa ra chiến lược CỤ THỂ, KHẢ THI để đạt mục tiêu đúng deadline.
+
+HÃY TRẢ LỜI THEO FORMAT SAU (QUAN TRỌNG):
+
+🔍 **ĐÁNH GIÁ THỰC TRẠNG**
+[2-3 câu phân tích tình hình: đang đi đúng hướng hay không? Điểm mạnh và yếu?]
+
+⚡ **CRITICAL INSIGHT**
+[Phát hiện quan trọng nhất về performance - vấn đề cốt lõi cần giải quyết NGAY]
+
+🎯 **CHIẾN LƯỢC 3 TUẦN TỚI** (để đạt {context['goal_progress'] + 30}% progress)
+• **Tuần 1**: [Mục tiêu cụ thể + số tasks cần complete]
+• **Tuần 2**: [Mục tiêu + escalation strategy]  
+• **Tuần 3**: [Final push + buffer plan]
+
+🔥 **4 ACTIONS NGAY TUẦN NÀY**
+1. [Action cụ thể #1 - ưu tiên cao nhất]
+2. [Action #2 - tăng velocity]
+3. [Action #3 - giảm bottleneck]
+4. [Action #4 - risk mitigation]
+
+💪 **MESSAGE ĐỘNG LỰC**
+[2-3 câu động viên, thực tế với tình huống. Tạo năng lượng để execute]
+
+YÊU CẦU:
+- Thẳng thắn, không lý thuyết suông
+- Số liệu cụ thể (bao nhiêu tasks/ngày)
+- Actions phải executable trong 24-48h
+- Tone: người mentor đi trước, đã trải nghiệm
+"""
+
+    try:
+        return call_gpt([
+            {"role": "system", "content": "You are an expert strategic advisor specializing in goal achievement. Answer in Vietnamese, be direct and actionable."},
+            {"role": "user", "content": prompt}
+        ], temperature=0.75, max_tokens=2000)
+    except Exception as e:
+        print(f"[ERROR] AI analysis failed: {e}")
+        return _emergency_fallback(context)
+
+def ai_tactical_weekly_plan(next_tasks, goal, context):
+    """
+    AI LẬP KẾ HOẠCH TACTICAL - LUÔN CHẠY
+    Focus: Làm GÌ, KHI NÀO, THẾ NÀO để đạt velocity
+    """
+    
+    tasks_summary = []
+    for t in next_tasks[:25]:
+        tasks_summary.append({
+            "title": get_title(t)[:60],
+            "due": str(get_date_start(t, PROP_DUE).date()) if get_date_start(t, PROP_DUE) else "TBD",
+            "priority": get_select_name(t, PROP_PRIORITY) or "Medium"
+        })
+    
+    prompt = f"""Bạn là tactical planner, chuyên thiết kế execution plan khả thi cao.
+
+📋 **CÔNG VIỆC TUẦN TỚI** ({len(next_tasks)} tasks):
+{json.dumps(tasks_summary, ensure_ascii=False, indent=2)}
+
+🎯 **MỤC TIÊU & CONSTRAINTS:**
+• Goal: {goal['title']}
+• Tasks còn lại: {goal['tong_nhiem_vu'] - goal['da_hoan_thanh']}
+• Velocity cần: {context['required_velocity']:.1f} tasks/tuần
+• Performance tuần trước: {context['completion_rate']:.0f}%
+
+---
+
+TẠO KẾ HOẠCH EXECUTION THEO FORMAT:
+
+📅 **WEEKLY BREAKDOWN**
+
+**THỨ 2-3: MOMENTUM BUILD** (Target: {int(context['required_velocity'] * 0.4)} tasks)
+[List 2-3 tasks cụ thể, bắt đầu với easy wins để tạo momentum]
+
+**THỨ 4-5: PEAK EXECUTION** (Target: {int(context['required_velocity'] * 0.4)} tasks)
+[High-value tasks, deep work sessions]
+
+**THỨ 6: COMPLETION** (Target: {int(context['required_velocity'] * 0.2)} tasks)
+[Wrap up, polish, prepare for review]
+
+**THỨ 7-CN: REVIEW & PREP**
+[What to review + prep work for next week]
+
+🎯 **3 MILESTONES QUAN TRỌNG**
+1. [By Thứ 3]: [Milestone cụ thể]
+2. [By Thứ 5]: [Milestone cụ thể]
+3. [By Thứ 6]: [Milestone cụ thể]
+
+⚠️ **RISK MANAGEMENT**
+• Risk #1: [Cụ thể] → Mitigation: [Hành động cụ thể]
+• Risk #2: [Cụ thể] → Mitigation: [Hành động cụ thể]
+
+⏰ **TIME BLOCKING GỢI Ý**
+• 09:00-12:00: [Activity type]
+• 14:00-17:00: [Activity type]
+• Evening: [Activity type]
+
+YÊU CẦU:
+- Thực tế với workload
+- Buffer cho unexpected
+- Momentum-driven (dễ → khó → wrap-up)
+"""
+
+    try:
+        return call_gpt([
+            {"role": "system", "content": "You are a tactical planner. Create realistic, executable plans. Answer in Vietnamese."},
+            {"role": "user", "content": prompt}
+        ], temperature=0.7, max_tokens=2200)
+    except Exception as e:
+        print(f"[ERROR] AI planning failed: {e}")
+        return "⚠️ Kế hoạch chi tiết sẽ được tạo khi AI system ổn định."
+
+def _emergency_fallback(context):
+    """Fallback message khi AI fail"""
+    return f"""🔍 **ĐÁNH GIÁ**
+Performance tuần này: {context['completion_rate']:.0f}%. {'Tốt' if context['completion_rate'] >= 70 else 'Cần cải thiện'}.
+
+⚡ **INSIGHT**
+Velocity gap: {context['required_velocity'] - context['goal_velocity']:+.1f} tasks/tuần.
+{'Cần tăng tốc để đạt mục tiêu đúng hạn.' if context['required_velocity'] > context['goal_velocity'] else 'Đang on track.'}
+
+🎯 **ACTION**
+• Tuần này: Complete {int(context['required_velocity'])} tasks
+• Focus: Xử lý {context['overdue_unfinished']} tasks quá hạn trước
+• Priority: High-value tasks của mục tiêu chính
+
+💪 **ĐỘNG LỰC**
+Từng bước nhỏ mỗi ngày. Consistency > intensity."""
+
+# ============================================================================
+# PHẦN 1: HÀM AI CHO BÁO CÁO THÁNG
+# ============================================================================
+
+def ai_monthly_insights(monthly_context):
+    """
+    AI PHÂN TÍCH BÁO CÁO THÁNG
+    - Review tháng vừa qua
+    - Lessons learned
+    - Đề xuất cho tháng tới
+    """
+    
+    prompt = f"""Bạn là executive coach chuyên về long-term goal achievement.
+
+📊 KẾT QUẢ THÁNG VỪA QUA:
+
+**Performance tổng thể:**
+• Việc hằng ngày hoàn thành: {monthly_context['daily_done']}
+• Quá hạn đã xử lý: {monthly_context['overdue_completed']}
+• Quá hạn chưa xử lý: {monthly_context['overdue_remaining']}
+
+**Tiến độ mục tiêu:**
+{monthly_context['goals_summary']}
+
+**Trends:**
+• So với tháng trước: {monthly_context['trend']}
+• Completion velocity: {monthly_context.get('avg_completion', 'N/A')}
 
 ---
 
 HÃY PHẢN HỒI THEO FORMAT:
 
-🔍 NHẬN ĐỊNH:
-[2-3 câu phân tích thực tế, thẳng thắn về tình hình]
+📈 **REVIEW THÁNG VỪA QUA**
+[2-3 câu đánh giá tổng thể: Highlights và lowlights]
 
-⚡ INSIGHT QUAN TRỌNG:
-[1-2 phát hiện sâu về pattern làm việc, điểm nghẽn]
+💡 **3 LESSONS LEARNED**
+1. [Bài học #1 từ data]
+2. [Bài học #2 về patterns]
+3. [Bài học #3 về execution]
 
-🎯 CHIẾN LƯỢC TUẦN TỚI:
-[3-4 actions cụ thể, có thể thực hiện. Mỗi action 1 dòng với emoji]
+🎯 **ĐỀ XUẤT CHO THÁNG TỚI**
+• Focus area: [1-2 lĩnh vực cần tập trung]
+• Adjustment: [Điều chỉnh cần làm]
+• New habits: [Thói quen mới nên thử]
 
-💪 LỜI ĐỘNG VIÊN:
-[2-3 câu động lực chân thực, tạo năng lượng bắt tay vào làm]
+🔥 **CHALLENGE THÁNG TỚI**
+[1 challenge cụ thể để push performance lên tầm cao mới]
 
 Yêu cầu:
-- Giọng điệu: người anh/chị đi trước
-- Thẳng thắn nhưng động viên
-- Cụ thể, có thể hành động
-- Không dùng từ ngữ sáo, generic
+- Strategic thinking (nhìn dài hạn)
+- Actionable insights
+- Dựa trên data thực tế
+- Tone: executive mentor
 """
 
     try:
         return call_gpt([
-            {"role": "system", "content": "You are a strategic life coach who combines data analysis with deep human understanding. Speak Vietnamese naturally."},
+            {"role": "system", "content": "You are an executive coach specializing in monthly performance review and strategic planning. Answer in Vietnamese."},
             {"role": "user", "content": prompt}
         ], temperature=0.8, max_tokens=1500)
     except Exception as e:
-        print(f"[ERROR] ai_deep_weekly_analysis: {e}")
-        return _fallback_analysis(context)
+        print(f"[ERROR] AI monthly insights failed: {e}")
+        return _monthly_fallback(monthly_context)
 
-def ai_smart_planning(next_week_tasks, goal_info, analysis_context):
-    """
-    AI LẬP KẾ HOẠCH TUẦN TỚI
-    - Phân bổ tasks theo năng lực thực tế
-    - Time blocking 7 ngày
-    - Đề xuất priorities động
-    - Milestones & rủi ro
-    """
-    
-    tasks_summary = []
-    for t in next_week_tasks[:20]:
-        title = get_title(t)
-        due = get_date_start(t, PROP_DUE)
-        priority = get_select_name(t, PROP_PRIORITY)
-        
-        tasks_summary.append({
-            "title": title[:50],
-            "due": str(due.date()) if due else "No deadline",
-            "priority": priority or "Medium"
-        })
-    
-    prompt = f"""Bạn là AI planner chuyên nghiệp, thiết kế kế hoạch thực tế và khả thi.
+def _monthly_fallback(context):
+    """Fallback cho AI monthly"""
+    return f"""📈 **REVIEW**
+Tháng này hoàn thành {context['daily_done']} việc hằng ngày. {'Tiến bộ tốt!' if context['daily_done'] > 20 else 'Cần cải thiện.'}
 
-📋 CÔNG VIỆC TUẦN TỚI ({len(next_week_tasks)} tasks):
-{json.dumps(tasks_summary, ensure_ascii=False, indent=2)}
+💡 **LESSONS**
+1. Duy trì consistency quan trọng hơn intensity
+2. Focus vào mục tiêu quan trọng nhất
+3. Buffer time cho unexpected tasks
 
-🎯 MỤC TIÊU:
-• {goal_info['title']}
-• Còn lại: {goal_info['total_tasks'] - goal_info['done_tasks']} tasks
-• Tốc độ cần: {analysis_context['required_velocity']:.1f} tasks/tuần
+🎯 **THÁNG TỚI**
+• Focus: Tăng completion rate lên >75%
+• Thử: Time blocking buổi sáng
+• Goal: +20% tasks cho mục tiêu chính
 
-💡 NĂNG LỰC THỰC TẾ:
-• Tỷ lệ hoàn thành tuần trước: {analysis_context['completion_rate']:.1f}%
-• Vấn đề: {analysis_context['detected_issues']}
-
----
-
-TẠO KẾ HOẠCH THEO FORMAT:
-
-📅 KẾ HOẠCH TUẦN:
-
-**Thứ 2 - KHỞI ĐỘNG**
-[2-3 tasks ưu tiên cao nhưng không quá nặng]
-
-**Thứ 3-4 - PEAK PERFORMANCE**
-[Tasks khó nhất khi năng lượng cao]
-
-**Thứ 5 - BUFFER DAY**
-[Tasks trung bình, để không gian xử lý phát sinh]
-
-**Thứ 6 - TỐC ĐỘ**
-[Hoàn thiện tasks nhỏ]
-
-**Thứ 7-CN - REVIEW**
-[Review tuần + chuẩn bị tuần sau]
-
-🎯 3 MỐC QUAN TRỌNG:
-[3 milestones phải đạt trong tuần]
-
-⚠️ RỦI RO CẦN TRÁNH:
-[2-3 điểm có thể trật bánh + cách phòng tránh]
-
-Yêu cầu:
-- Thực tế với năng lực hiện tại
-- Tạo momentum tăng dần
-- Buffer cho phát sinh
-"""
-
-    try:
-        return call_gpt([
-            {"role": "system", "content": "You are an expert weekly planner who creates realistic schedules. Answer in Vietnamese."},
-            {"role": "user", "content": prompt}
-        ], temperature=0.7, max_tokens=2000)
-    except Exception as e:
-        print(f"[ERROR] ai_smart_planning: {e}")
-        return "Kế hoạch chi tiết sẽ được tạo sau."
-
-def _fallback_analysis(context):
-    """Fallback khi AI không available"""
-    if context['completion_rate'] >= 70:
-        return """🔍 NHẬN ĐỊNH:
-Tuần này bạn làm việc hiệu quả với tỷ lệ hoàn thành tốt.
-
-⚡ INSIGHT:
-Hãy duy trì momentum và tăng tốc ở tasks quan trọng.
-
-🎯 CHIẾN LƯỢC:
-• Tập trung hoàn thiện mục tiêu chính
-• Xử lý việc quá hạn tồn đọng  
-• Review và lập kế hoạch
-
-💪 ĐỘNG VIÊN:
-Bạn đang trên đà tốt. Tiếp tục như vậy!"""
-    else:
-        return """🔍 NHẬN ĐỊNH:
-Tuần này có việc chưa hoàn thành như kế hoạch.
-
-⚡ INSIGHT:
-Xem lại workload và ưu tiên việc thực sự quan trọng.
-
-🎯 CHIẾN LƯỢC:
-• Giảm số lượng tasks, tăng chất lượng
-• Focus 3-5 việc quan trọng nhất
-• Tạo buffer cho phát sinh
-
-💪 ĐỘNG VIÊN:
-Bắt đầu lại với những bước nhỏ, chắc chắn."""
+🔥 **CHALLENGE**
+Hoàn thành 30+ tasks hằng ngày tháng tới!"""
 
 # ============================================================================
-# JOB WEEKLY - PHIÊN BẢN NÂNG CẤP VỚI AI CAN THIỆP SÂU
+# JOB WEEKLY - VERSION MỚI: LUÔN GỌI AI, PHÂN TÍCH SÂU
 # ============================================================================
 
 def job_weekly():
-    """
-    BÁO CÁO TUẦN với AI CAN THIỆP SÂU:
-    1. Thu thập dữ liệu thực tế
-    2. Phát hiện vấn đề & patterns
-    3. AI phân tích chiến lược
-    4. AI lập kế hoạch tuần tới
-    5. Gửi báo cáo đầy đủ
-    """
-    print(f"\n{'='*60}")
-    print(f"[WEEKLY] Started at {datetime.datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"{'='*60}\n")
+    """BÁO CÁO TUẦN với AI PHÂN TÍCH SÂU - LUÔN CHẠY"""
+    
+    print(f"\n{'='*70}")
+    print(f"[WEEKLY REPORT] Started at {datetime.datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*70}\n")
 
     today = datetime.datetime.now(TZ).date()
-    week_start = today - datetime.timedelta(days=today.weekday())
-    week_end = week_start + datetime.timedelta(days=6)
+    week_start, week_end = week_range(today)
 
-    # ========================================================================
-    # BƯỚC 1: THU THẬP DỮ LIỆU TUẦN VỪA QUA
-    # ========================================================================
-    print("[1/6] Thu thập dữ liệu từ Notion...")
+    # ====================================================================
+    # STEP 1: THU THẬP TẤT CẢ TASKS TRONG TUẦN (cả done và chưa done)
+    # ====================================================================
+    print("[1/5] Collecting data...")
     
+    # Query CẢ done và chưa done để tính completion rate
     all_tasks = notion_query(
         REMIND_DB,
         {
-            "and": [
-                {"property": PROP_DONE, "checkbox": {"equals": False}},
-                {"or": [
-                    {"property": PROP_DUE, "date": {
+            "or": [
+                {
+                    "property": PROP_DUE,
+                    "date": {
                         "on_or_after": week_start.isoformat(),
                         "on_or_before": week_end.isoformat()
-                    }},
-                    {"property": PROP_DUE, "date": {
-                        "before": week_start.isoformat()
-                    }}
-                ]}
+                    }
+                },
+                {
+                    "property": PROP_DUE,
+                    "date": {"before": week_start.isoformat()}
+                }
             ]
         }
     ) or []
 
+    print(f"      → Found {len(all_tasks)} tasks in week range")
 
-    # Phân tích tasks
+    # Phân tích performance (ĐÚNG – KHÔNG CRASH)
     completed_ontime = 0
-    completed_overdue = 0
-    overdue_unfinished = 0
-    workload_by_day = defaultdict(int)
-    priority_dist = defaultdict(int)
+    completed_late = 0
+    overdue_pending = 0
 
-    for t in all_tasks:
-        is_done = get_checkbox(t, PROP_DONE)
-        due_date = get_date_start(t, PROP_DUE)
-        priority = get_select_name(t, PROP_PRIORITY)
-        
-        if priority:
-            priority_dist[priority] += 1
-        
-        if due_date:
-            workload_by_day[due_date.date().strftime("%a")] += 1
-            
-            if is_done:
-                completed_date = _parse_completed_datetime_from_page(t)
-                if completed_date:
-                    comp_d = completed_date.date() if isinstance(completed_date, datetime.datetime) else completed_date
-                    if comp_d <= due_date.date():
-                        completed_ontime += 1
-                    else:
-                        completed_overdue += 1
+    for task in all_tasks:
+        is_done = get_checkbox(task, PROP_DONE)
+        due_dt = get_date_start(task, PROP_DUE)
+
+        if not due_dt:
+            continue
+
+        if is_done:
+            completed_dt = _parse_completed_datetime_from_page(task)
+
+            if completed_dt:
+                completed_date = (
+                    completed_dt.date()
+                    if isinstance(completed_dt, datetime.datetime)
+                    else completed_dt
+                )
+
+                if completed_date <= due_dt.date():
+                    completed_ontime += 1
                 else:
-                    completed_ontime += 1  # Assume on time if no completed date
+                    completed_late += 1
             else:
-                if due_date.date() < today:
-                    overdue_unfinished += 1
+                # Không có completed date → fallback an toàn
+                completed_ontime += 1
+
+        else:
+            if due_dt.date() < today:
+                overdue_pending += 1
 
     total_tasks = len(all_tasks)
-    completed_total = completed_ontime + completed_overdue
+    completed_total = completed_ontime + completed_late
     completion_rate = (completed_total / total_tasks * 100) if total_tasks > 0 else 0
 
-    # ========================================================================
-    # BƯỚC 2: PHÂN TÍCH MỤC TIÊU
-    # ========================================================================
-    print("[2/6] Phân tích mục tiêu...")
+    # ---------- WORKLOAD BY DAY (TIẾNG VIỆT) ----------
+    weekday_map = {
+        0: "Thứ 2",
+        1: "Thứ 3",
+        2: "Thứ 4",
+        3: "Thứ 5",
+        4: "Thứ 6",
+        5: "Thứ 7",
+        6: "Chủ nhật"
+    }
+
+    workload_by_day = defaultdict(int)
+    for t in all_tasks:
+        due = get_date_start(t, PROP_DUE)
+        if due:
+            workload_by_day[weekday_map[due.weekday()]] += 1
+
+    workload_distribution = "\n".join(
+        f"  • {day}: {count} tasks"
+        for day, count in workload_by_day.items()
+    ) or "  • Không có dữ liệu"
+
+
+    # ====================================================================
+    # STEP 2: PHÂN TÍCH MỤC TIÊU
+    # ====================================================================
+    print("[2/5] Analyzing goal...")
     
     goals = notion_query(GOALS_DB) or []
-    top_goal = pick_top_goal(goals)
-    
-    if not top_goal:
-        print("[WARN] Không tìm thấy goal phù hợp.")
+    if not goals:
+        print("      ⚠️ No goals found!")
+        send_telegram("⚠️ Không tìm thấy mục tiêu để phân tích. Hãy tạo goal trong Notion.")
         return
-
-    progress_pct = int(top_goal.get("progress_pct", 0))
-    done_tasks_week = top_goal.get("nhiem_vu_hoan_tuan_rollup", 0)
-    total_tasks_goal = top_goal.get("tong_nhiem_vu_rollup", 0)
-    done_tasks_goal = top_goal.get("nhiem_vu_da_hoan_rollup", 0)
     
-    # Tính velocity cần thiết
+    # Pick goal đang active
+    active_goals = [
+        read_goal_properties(g)
+        for g in goals
+        if read_goal_properties(g)['progress_pct'] < 100
+    ]
+
+    active_goals.sort(
+        key=lambda g: g.get("ngay_hoan_thanh") or datetime.date.max
+    )
+
+    target_goal = active_goals[0] if active_goals else None
+  
+    if not target_goal:
+        print("      ⚠️ No active goal!")
+        send_telegram("✅ Tất cả mục tiêu đã hoàn thành! Time to celebrate 🎉")
+        return
     
-    weeks_remaining = 1  # default an toàn
-
-    if top_goal.get("ngay_hoan_thanh"):
-        days_left = (top_goal["ngay_hoan_thanh"] - today).days
-        weeks_remaining = max(1, ceil(days_left / 7))
-
-    tasks_remaining = max(0, total_tasks_goal - done_tasks_goal)
+    print(f"      → Target: {target_goal['title']} ({target_goal['progress_pct']}%)")
+    
+    # Tính toán velocity
+    days_remaining = (target_goal['ngay_hoan_thanh'] - today).days if target_goal['ngay_hoan_thanh'] else 30
+    weeks_remaining = max(1, ceil(days_remaining / 7))
+    tasks_remaining = max(0, target_goal['tong_nhiem_vu'] - target_goal['da_hoan_thanh'])
     required_velocity = round(tasks_remaining / weeks_remaining, 2)
-
-
-    # ========================================================================
-    # BƯỚC 3: PHÁT HIỆN VẤN ĐỀ & XÁC ĐỊNH TÌNH TRẠNG
-    # ========================================================================
-    print("[3/6] Phát hiện vấn đề và patterns...")
     
-    detected_issues = []
-    if overdue_unfinished >= 3:
-        detected_issues.append("⚠️ Nhiều việc quá hạn chưa xử lý → Quá tải hoặc ưu tiên chưa đúng")
-    if completed_overdue >= 3:
-        detected_issues.append("⏰ Hoàn thành nhiều việc trễ → Deadline estimation cần cải thiện")
-    if done_tasks_week == 0:
-        detected_issues.append("🎯 Chưa đóng góp vào mục tiêu chính → Mất focus")
+    print(f"      → Need {required_velocity} tasks/week for {weeks_remaining} weeks")
+    
+    # ====================================================================
+    # STEP 3: PHÁT HIỆN VẤN ĐỀ
+    # ====================================================================
+    print("[3/5] Detecting issues...")
+    
+    issues = []
+    if overdue_pending >= 3:
+        issues.append(f"⚠️ {overdue_pending} tasks quá hạn - Risk cao!")
     if completion_rate < 50:
-        detected_issues.append("📉 Tỷ lệ hoàn thành thấp → Cần giảm workload hoặc tăng discipline")
+        issues.append(f"📉 Completion rate thấp ({completion_rate:.0f}%) - Cần review workload")
+    if target_goal and target_goal.get('hoan_tuan_nay', 0) == 0:
+        issues.append("⛔ Chưa complete task nào cho goal - Mất focus")
+    if required_velocity > target_goal['hoan_tuan_nay'] * 2:
+        issues.append(f"🚨 Cần tăng velocity gấp đôi ({required_velocity:.1f} vs {target_goal['hoan_tuan_nay']})")
     
-    if not detected_issues:
-        detected_issues.append("✅ Không phát hiện vấn đề nghiêm trọng")
-
-    # ========================================================================
-    # BƯỚC 4: AI PHÂN TÍCH CHIẾN LƯỢC
-    # ========================================================================
-    print("[4/6] AI đang phân tích chiến lược...")
+    if not issues:
+        issues.append("✅ Không phát hiện vấn đề nghiêm trọng")
     
-    workload_dist = "\n".join([f"  • {day}: {count} tasks" for day, count in sorted(workload_by_day.items())])
+    # ====================================================================
+    # STEP 4: AI PHÂN TÍCH CHIẾN LƯỢC - LUÔN CHẠY
+    # ====================================================================
+    print("[4/5] Running AI strategic analysis...")
     
     analysis_context = {
         'total_tasks': total_tasks,
         'completed_ontime': completed_ontime,
-        'completed_overdue': completed_overdue,
-        'overdue_unfinished': overdue_unfinished,
+        'completed_late': completed_late,
+        'overdue_unfinished': overdue_pending,
         'completion_rate': completion_rate,
-        'goal_title': top_goal['title'],
-        'goal_progress': progress_pct,
-        'goal_done': done_tasks_goal,
-        'goal_total': total_tasks_goal,
-        'goal_velocity': done_tasks_week,
+
+        'goal_title': target_goal['title'] if target_goal else "Không có mục tiêu",
+        'goal_progress': target_goal.get('progress_pct', 0) if target_goal else 0,
+        'goal_done': target_goal.get('da_hoan_thanh', 0) if target_goal else 0,
+        'goal_total': target_goal.get('tong_nhiem_vu', 0) if target_goal else 0,
+        'goal_velocity': target_goal.get('hoan_tuan_nay', 0) if target_goal else 0,
+
         'required_velocity': required_velocity,
-        'workload_distribution': workload_dist or "  • Không có dữ liệu",
-        'detected_issues': "\n".join(detected_issues)
+        'days_remaining': days_remaining,
+        'tasks_remaining': tasks_remaining,
+        'workload_distribution': workload_distribution,
+        'detected_issues': "\n".join(issues)
     }
 
-    if ENABLE_AI:
-        try:
-            ai_analysis = ai_deep_weekly_analysis(analysis_context)
-        except Exception as e:
-            print("[WARN] AI weekly analysis failed:", e)
-            ai_analysis = _fallback_analysis(analysis_context)
-    else:
-        ai_analysis = _fallback_analysis(analysis_context)
-
-
-    # ========================================================================
-    # BƯỚC 5: AI LẬP KẾ HOẠCH TUẦN TỚI
-    # ========================================================================
-    print("[5/6] AI đang lập kế hoạch tuần tới...")
+    try:
+        ai_analysis = ai_strategic_weekly_analysis(analysis_context)
+        print("      ✓ AI analysis completed")
+    except Exception as e:
+        print(f"      ✗ AI analysis failed: {e}")
+        ai_analysis = _emergency_fallback(analysis_context)
+    
+    # ====================================================================
+    # STEP 5: AI LẬP KẾ HOẠCH - LUÔN CHẠY
+    # ====================================================================
+    print("[5/5] Generating AI tactical plan...")
     
     next_week_start = week_end + datetime.timedelta(days=1)
     next_week_end = next_week_start + datetime.timedelta(days=6)
@@ -886,66 +767,74 @@ def job_weekly():
         REMIND_DB,
         {
             "and": [
-                {"property": PROP_DUE, "date": {"on_or_after": next_week_start.isoformat()}},
-                {"property": PROP_DUE, "date": {"on_or_before": next_week_end.isoformat()}},
+                {
+                    "property": PROP_DUE,
+                    "date": {
+                        "on_or_after": next_week_start.isoformat(),
+                        "on_or_before": next_week_end.isoformat()
+                    }
+                },
                 {"property": PROP_DONE, "checkbox": {"equals": False}}
             ]
         }
     ) or []
-
-    if ENABLE_AI:
-        try:
-            ai_plan = ai_smart_planning(next_week_tasks, top_goal, analysis_context)
-        except Exception as e:
-            print("[WARN] AI weekly planning failed:", e)
-            ai_plan = "⚠️ Kế hoạch chi tiết sẽ được tạo sau khi hệ thống ổn định."
-    else:
-        ai_plan = "ℹ️ AI hiện đang tắt. Kế hoạch tuần sẽ được tạo thủ công."
-
-
-    # ========================================================================
-    # BƯỚC 6: BUILD BÁO CÁO HOÀN CHỈNH
-    # ========================================================================
-    print("[6/6] Tạo báo cáo và gửi...")
     
-    progress_bar = "█" * int(progress_pct / 10) + "░" * (10 - int(progress_pct / 10))
-
+    print(f"      → Found {len(next_week_tasks)} tasks for next week")
+    
+    try:
+        ai_plan = ai_tactical_weekly_plan(next_week_tasks, target_goal, analysis_context)
+        print("      ✓ AI plan completed")
+    except Exception as e:
+        print(f"      ✗ AI plan failed: {e}")
+        ai_plan = f"⚠️ Tuần tới cần complete ~{int(required_velocity)} tasks. AI plan sẽ được tạo khi system ổn định."
+    
+    # ====================================================================
+    # STEP 6: GỬI BÁO CÁO
+    # ====================================================================
+    progress_bar = "█" * (target_goal['progress_pct'] // 10) + "░" * (10 - target_goal['progress_pct'] // 10)
+    
     message = f"""
 📊 <b>BÁO CÁO TUẦN — {week_start.strftime('%d/%m')} đến {week_end.strftime('%d/%m/%Y')}</b>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-<b>📈 TỔNG QUAN TUẦN VỪA QUA</b>
+<b>📈 HIỆU SUẤT TUẦN VỪA QUA</b>
 
-<b>Công việc hàng ngày:</b>
-  ✅ Hoàn thành đúng hạn: <b>{completed_ontime}</b>
-  ⏰ Hoàn thành trễ: {completed_overdue}
-  🆘 Quá hạn chưa làm: {overdue_unfinished}
-  📊 Tỷ lệ hoàn thành: <b>{completion_rate:.1f}%</b>
+<b>Công việc:</b>
+  ✅ Hoàn thành: <b>{completed_ontime}</b>/{total_tasks}
+  🆘 Quá hạn chưa xử lý: {overdue_pending}
+  📊 Completion rate: <b>{completion_rate:.1f}%</b>
 
-<b>Mục tiêu chính:</b>
-  🎯 {top_goal['title']}
-  📈 Tiến độ: <b>{progress_pct}%</b> [{progress_bar}]
-  ⚡ Tốc độ tuần này: {done_tasks_week} tasks
-  🎪 Cần duy trì: {required_velocity:.1f} tasks/tuần
+<b>Mục tiêu: {target_goal['title']}</b>
+  📈 Progress: <b>{target_goal['progress_pct']}%</b> [{progress_bar}]
+  ⚡ Velocity tuần này: {target_goal['hoan_tuan_nay']} tasks
+  🎯 Velocity cần thiết: <b>{required_velocity:.1f} tasks/tuần</b>
+  ⏰ Thời gian còn lại: {days_remaining} ngày ({weeks_remaining} tuần)
+  📦 Tasks còn lại: {tasks_remaining}/{target_goal['tong_nhiem_vu']}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-<b>🤖 PHÂN TÍCH & CHIẾN LƯỢC</b>
+<b>🤖 PHÂN TÍCH CHIẾN LƯỢC AI</b>
 
 {ai_analysis}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 <b>📅 KẾ HOẠCH TUẦN TỚI</b>
 
+<b>Công việc tuần tới:</b> {len(next_week_tasks)} tasks
+
 {ai_plan}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-<i>Generated by AI • {datetime.datetime.now(TZ).strftime('%H:%M %d/%m/%Y')}</i>
+<i>🤖 AI-Powered Strategic Report • {datetime.datetime.now(TZ).strftime('%H:%M %d/%m/%Y')}</i>
 """
-
+    
     send_telegram_long(message.strip())
     
-    print(f"\n✅ Báo cáo tuần đã gửi!")
-    print(f"{'='*60}\n")
+    print(f"\n✅ Weekly report sent successfully!")
+    print(f"{'='*70}\n")
+
+# ============================================================================
+# JOB DAILY - SIMPLIFIED VERSION
+# ============================================================================
 
 # ============================================================================
 # JOB DAILY - GIỮ NGUYÊN CODE CŨ
@@ -1125,14 +1014,22 @@ def job_daily():
     LAST_TASKS = [p.get("id") for p in tasks if p and isinstance(p, dict)]
 
 # ============================================================================
-# JOB MONTHLY - GIỮ NGUYÊN CODE CŨ
+# PHẦN 2: HÀM job_monthly MỚI - THAY THẾ HOÀN TOÀN
 # ============================================================================
 
 def job_monthly():
+    """
+    BÁO CÁO THÁNG với AI INSIGHTS
+    - Giữ nguyên logic cũ
+    - Thêm AI phân tích strategic
+    """
     today = datetime.datetime.now(TZ).date()
     mstart, mend = month_range(today)
     print(f"[INFO] job_monthly start for {mstart} -> {mend}")
 
+    # ========================================================================
+    # PHẦN 1: LOGIC CŨ - GIỮ NGUYÊN
+    # ========================================================================
     filters_done = [{"property": PROP_DONE, "checkbox": {"equals": True}}]
     if PROP_ACTIVE:
         filters_done.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
@@ -1141,9 +1038,10 @@ def job_monthly():
         done_pages = notion_query(REMIND_DB, {"and": filters_done})
         print(f"[DBG] job_monthly: fetched {len(done_pages)} done pages")
     except Exception as e:
-        print("[WARN] job_monthly failed:", e)
+        print("[WARN] job_monthly: notion_query failed:", e)
         done_pages = []
 
+    # Tính tasks hoàn thành trong tháng
     done_this_month = []
     for p in done_pages:
         try:
@@ -1157,6 +1055,7 @@ def job_monthly():
             print("[WARN] error parsing completed date:", ex)
             continue
 
+    # Đếm việc hằng ngày
     daily_month_done = 0
     for p, comp_date in done_this_month:
         try:
@@ -1166,6 +1065,7 @@ def job_monthly():
         except:
             continue
 
+    # Đếm overdue done
     overdue_done = 0
     for p, comp_date in done_this_month:
         try:
@@ -1175,9 +1075,10 @@ def job_monthly():
         except:
             continue
 
+    # Đếm overdue chưa xử lý
     filters_overdue = [
         {"property": PROP_DONE, "checkbox": {"equals": False}},
-        {"property": PROP_DUE, "date": {"before": datetime.datetime.now(TZ).date().isoformat()}}
+        {"property": PROP_DUE, "date": {"before": today.isoformat()}}
     ]
     if PROP_ACTIVE:
         filters_overdue.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
@@ -1189,7 +1090,10 @@ def job_monthly():
         print("[WARN] overdue query failed:", e)
         overdue_remaining = 0
 
+    # Tổng hợp mục tiêu
     goals_summary = []
+    goals_text = []
+    
     if GOALS_DB:
         try:
             goals = notion_query(GOALS_DB)
@@ -1203,43 +1107,77 @@ def job_monthly():
                 ginfo = read_goal_properties(g)
             except Exception as e:
                 print("[WARN] read_goal_properties failed:", e)
-                ginfo = {}
+                continue
 
-            total = ginfo.get("tong_nhiem_vu_rollup")
-            done_total = ginfo.get("nhiem_vu_da_hoan_rollup")
+            total = ginfo.get("tong_nhiem_vu", 0)
+            done_total = ginfo.get("da_hoan_thanh", 0)
+
             monthly_done = ginfo.get("nhiem_vu_hoan_thang_rollup") or 0
             progress_pct = ginfo.get("progress_pct") or 0
 
             gs = {
                 "name": ginfo.get("title") or "(no title)",
                 "progress": int(progress_pct),
-                "done": done_total or 0,
-                "total": total or 0,
+                "done": done_total,
+                "total": total,
                 "monthly_done": monthly_done
             }
             goals_summary.append(gs)
+            
+            # Text cho AI
+            goals_text.append(f"  • {gs['name']}: {gs['progress']}% ({gs['done']}/{gs['total']}) - Tháng này: +{gs['monthly_done']} tasks")
 
-    lines = [f"📅 <b>Báo cáo tháng {today.strftime('%m/%Y')}</b>", ""]
-    lines.append(f"• ✔ Việc hằng ngày hoàn thành tháng: {daily_month_done}")
-    lines.append(f"• ⏳ Quá hạn đã hoàn thành: {overdue_done}")
-    lines.append(f"• 🆘 Quá hạn chưa làm: {overdue_remaining}")
+    # ========================================================================
+    # PHẦN 2: AI INSIGHTS - MỚI THÊM
+    # ========================================================================
+    print("[AI] Generating monthly insights...")
+    
+    monthly_context = {
+        'daily_done': daily_month_done,
+        'overdue_completed': overdue_done,
+        'overdue_remaining': overdue_remaining,
+        'goals_summary': "\n".join(goals_text) if goals_text else "  • Chưa có mục tiêu",
+        'trend': 'Đang phát triển' if daily_month_done > 20 else 'Cần cải thiện',
+        'avg_completion': f"{daily_month_done/30:.1f} tasks/ngày" if daily_month_done > 0 else "N/A"
+    }
+    
+    try:
+        ai_insights = ai_monthly_insights(monthly_context)
+        print("[AI] Monthly insights generated")
+    except Exception as e:
+        print(f"[ERROR] AI monthly insights failed: {e}")
+        ai_insights = _monthly_fallback(monthly_context)
+
+    # ========================================================================
+    # PHẦN 3: BUILD MESSAGE - NÂNG CẤP
+    # ========================================================================
+    lines = [f"📅 <b>BÁO CÁO THÁNG {today.strftime('%m/%Y')}</b>", ""]
+    lines.append(f"• ✔ Việc hằng ngày hoàn thành: <b>{daily_month_done}</b>")
+    lines.append(f"• ⏳ Quá hạn đã xử lý: {overdue_done}")
+    lines.append(f"• 🆘 Quá hạn chưa xử lý: {overdue_remaining}")
     lines.append("")
-    lines.append("🎯 Tiến độ mục tiêu chính:")
+    lines.append("🎯 <b>Tiến độ mục tiêu:</b>")
     
     for g in sorted(goals_summary, key=lambda x: -x['progress'])[:8]:
-        bar = render_progress_bar(g['progress'])
-        lines.append(f"• {g['name']} → {g['progress']}% ({g['done']}/{g['total']}) {bar}")
-        lines.append(f"  → Nhiệm vụ hoàn thành tháng này: {g['monthly_done']}")
+        bar = "█" * (g['progress'] // 10) + "░" * (10 - g['progress'] // 10)
+        lines.append(f"• {g['name']}")
+        lines.append(f"  → {g['progress']}% ({g['done']}/{g['total']}) [{bar}]")
+        lines.append(f"  → Tháng này: +{g['monthly_done']} tasks")
     
     lines.append("")
-    lines.append("📈 <b>Tổng quan</b>")
-    lines.append("Sếp đang tiến rất tốt! Hãy lăn quả tuyết này để tiến tới hoàn thành mục tiêu lớn. 🎯 Tháng sau bứt phá thêm nhé! 🔥🔥🔥")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("<b>🤖 AI STRATEGIC INSIGHTS</b>")
+    lines.append("")
+    lines.append(ai_insights)
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("<i>💪 Tháng mới, động lực mới!</i>")
 
     send_telegram("\n".join(lines).strip())
-    print(f"[INFO] job_monthly sent")
+    print(f"[INFO] job_monthly sent with AI insights")
 
 # ============================================================================
-# TELEGRAM WEBHOOK HANDLERS - GIỮ NGUYÊN
+# TELEGRAM WEBHOOK HANDLERS
 # ============================================================================
 
 @app.route("/webhook", methods=["POST"])
@@ -1249,207 +1187,93 @@ def webhook():
         update = request.get_json(silent=True) or {}
         message = update.get("message", {}) or {}
         chat_id = str(message.get("chat", {}).get("id", ""))
-        if TELEGRAM_CHAT_ID and chat_id != TELEGRAM_CHAT_ID:
-            return jsonify({"ok": False, "error": "forbidden"}), 403
         text = (message.get("text", "") or "").strip()
+        
         if not text.startswith("/"):
             return jsonify({"ok": True}), 200
         
+        # /check - show tasks
         if text.lower() == "/check":
-            now = datetime.datetime.now(TZ).date()
-            start_week, end_week = week_range(now)
-
-            filters = [
-                {"property": PROP_DONE, "checkbox": {"equals": False}},
-                {"or": [
-                    {"property": PROP_DUE, "date": {"on_or_after": start_week.isoformat(), "on_or_before": end_week.isoformat()}},
-                    {"property": PROP_DUE, "date": {"before": now.isoformat()}}
-                ]}
-            ]
-            if PROP_ACTIVE:
-                filters.insert(0, {"property": PROP_ACTIVE, "checkbox": {"equals": True}})
-
-            tasks = notion_query(REMIND_DB, {"and": filters}) or []
-
+            today = datetime.datetime.now(TZ).date()
+            week_start, week_end = week_range(today)
+            
+            tasks = notion_query(
+                REMIND_DB,
+                {
+                    "and": [
+                        {"property": PROP_DONE, "checkbox": {"equals": False}},
+                        {"or": [
+                            {"property": PROP_DUE, "date": {
+                                "on_or_after": week_start.isoformat(),
+                                "on_or_before": week_end.isoformat()
+                            }},
+                            {"property": PROP_DUE, "date": {"before": today.isoformat()}}
+                        ]}
+                    ]
+                }
+            ) or []
+            
             if not tasks:
-                send_telegram("🎉 Không có nhiệm vụ trong tuần này hoặc quá hạn.")
+                send_telegram("🎉 Không có nhiệm vụ pending!")
                 return jsonify({"ok": True}), 200
-
-            lines = [f"📋 <b>Danh sách nhiệm vụ tuần {start_week.strftime('%d/%m')} - {end_week.strftime('%d/%m')}</b>", ""]
-
-            visible_tasks = []
-            for p in tasks:
-                try:
-                    if not p or not isinstance(p, dict):
-                        continue
-                    if get_checkbox(p, PROP_DONE):
-                        continue
-
-                    title = get_title(p)
-                    pri = get_select_name(p, PROP_PRIORITY) or ""
-                    sym = priority_emoji(pri)
-                    note_text = get_note_text(p)
-                    
-                    due_dt = get_date_start(p, PROP_DUE)
-                    due_text = f" — hạn: {format_dt(due_dt)}" if due_dt else ""
-                    
-                    d = overdue_days(p)
-                    if d is None:
-                        sys_note = ""
-                    elif d > 0:
-                        sys_note = f"↳⏰ Đã trễ {d} ngày"
-                    elif d == 0:
-                        sys_note = "↳💥 Làm ngay hôm nay!"
-                    else:
-                        sys_note = f"↳⏳ Còn {abs(d)} ngày nữa"
-
-                    line = f"{len(visible_tasks)+1} {sym} <b>{title}</b> — Cấp độ: {pri}{due_text}"
-
-                    if note_text:
-                        line += f"\n📝 {note_text}"
-                    if sys_note:
-                        line += f"\n  {sys_note}"
-
-                    lines.append(line)
-                    visible_tasks.append(p)
-
-                except Exception as e:
-                    print("[ERROR] formatting /check task:", e)
-                    continue
-
-            LAST_TASKS[chat_id] = [
-                p.get("id") for p in visible_tasks if p and isinstance(p, dict)
-            ]
-
+            
+            lines = [f"📋 <b>Tasks tuần này</b> ({len(tasks)})\n"]
+            for i, p in enumerate(tasks[:20], 1):
+                title = get_title(p)
+                pri = get_select_name(p, PROP_PRIORITY)
+                emoji = priority_emoji(pri)
+                d = overdue_days(p)
+                status = f"Trễ {d}d" if d and d > 0 else f"Còn {abs(d)}d" if d else ""
+                lines.append(f"{i}. {emoji} {title} {status}")
+            
+            LAST_TASKS[chat_id] = [p.get("id") for p in tasks[:20]]
             send_telegram("\n".join(lines))
             return jsonify({"ok": True}), 200
-
+        
+        # /done.N - mark done
         elif text.lower().startswith("/done."):
             parts = text.split(".", 1)
-
-            if len(parts) < 2 or not parts[1].strip().isdigit():
-                send_telegram("❌ Số không hợp lệ. Gõ /done.<số> (ví dụ /done.1).")
+            if len(parts) < 2 or not parts[1].isdigit():
+                send_telegram("❌ Dùng: /done.1")
                 return jsonify({"ok": True}), 200
-
-            n = int(parts[1].strip())
-
+            
+            n = int(parts[1])
             task_list = LAST_TASKS.get(chat_id, [])
-
+            
             if n < 1 or n > len(task_list):
-                send_telegram("❌ Số không hợp lệ. Gõ /check để xem danh sách.")
+                send_telegram("❌ Số không hợp lệ")
                 return jsonify({"ok": True}), 200
-
+            
             page_id = task_list[n - 1]
-
-            now_iso = datetime.datetime.now(TZ).isoformat()
-
-            props = {PROP_DONE: {"checkbox": True}}
-            if PROP_COMPLETED:
-                props[PROP_COMPLETED] = {"date": {"start": now_iso}}
-
-            notion_update_page(page_id, props)
-
-            title = ""
-            try:
-                p = req_get(f"/pages/{page_id}")
-                title = get_title(p)
-            except Exception:
-                title = ""
-
-            send_telegram(f"✅ Đã đánh dấu Done cho nhiệm vụ số {n}. {title}")
+            notion_update_page(page_id, {
+                PROP_DONE: {"checkbox": True},
+                PROP_COMPLETED: {"date": {"start": datetime.datetime.now(TZ).isoformat()}}
+            })
+            
+            send_telegram(f"✅ Done task #{n}!")
             return jsonify({"ok": True}), 200
-
-
-        elif text.lower().startswith("/new."):
-            payload = text[5:]
-            parts = payload.split(".")
-            if len(parts) < 2:
-                send_telegram("❌ Format sai! Ví dụ: /new.Gọi khách 150tr.081225.0900.cao")
-                return jsonify({"ok": True}), 200
-            name = parts[0].strip()
-            date_part = parts[1].strip()
-            time_part = parts[2].strip() if len(parts) >= 3 else "0000"
-            priority = parts[3].strip().lower() if len(parts) >= 4 else "thấp"
-            try:
-                if len(date_part) == 6:
-                    dd = int(date_part[0:2]); mm = int(date_part[2:4]); yy = int(date_part[4:6]); yyyy = 2000 + yy
-                elif len(date_part) == 8:
-                    dd = int(date_part[0:2]); mm = int(date_part[2:4]); yyyy = int(date_part[4:8])
-                else:
-                    raise ValueError("Bad date")
-                hh = int(time_part[0:2]) if len(time_part) >= 2 else 0
-                mi = int(time_part[2:4]) if len(time_part) >= 4 else 0
-                dt = datetime.datetime(yyyy, mm, dd, hh, mi)
-                iso_due = TZ.localize(dt).isoformat()
-            except:
-                send_telegram("❌ Không parse được ngày/giờ.")
-                return jsonify({"ok": True}), 200
-            props = {PROP_TITLE: {"title": [{"text": {"content": name}}]}}
-            if PROP_DUE:
-                props[PROP_DUE] = {"date": {"start": iso_due}}
-            if PROP_PRIORITY:
-                props[PROP_PRIORITY] = {"select": {"name": priority.capitalize()}}
-            if PROP_TYPE:
-                props[PROP_TYPE] = {"select": {"name": "Hằng ngày"}}
-            if PROP_ACTIVE:
-                props[PROP_ACTIVE] = {"checkbox": True}
-            if PROP_DONE:
-                props[PROP_DONE] = {"checkbox": False}
-            newp = notion_create_page(REMIND_DB, props)
-            if newp:
-                send_telegram(f"✅ Đã tạo: {name} — hạn: {dt.strftime('%d/%m/%Y %H:%M')} — {priority}")
-            else:
-                send_telegram("❌ Lỗi tạo nhiệm vụ.")
-            return jsonify({"ok": True}), 200
-
-        send_telegram("❓ Lệnh không nhận diện. Dùng /check, /done.<n>, /new")
+        
+        send_telegram("❓ Lệnh: /check, /done.N")
         return jsonify({"ok": True}), 200
+        
     except Exception as e:
-        print("Unhandled webhook error:", e)
-        send_telegram("❌ Lỗi nội bộ.")
+        print(f"[ERROR] Webhook: {e}")
         return jsonify({"ok": True}), 200
-
-@app.route("/debug/schema", methods=["GET"])
-def debug_schema():
-    if not REMIND_DB:
-        return jsonify({"error": "REMIND_NOTION_DATABASE not set"}), 400
-    try:
-        db = req_get(f"/databases/{REMIND_DB}")
-        return jsonify({"database_id": REMIND_DB, "properties": db.get("properties", {})})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 @app.route("/health", methods=["GET"])
 def health():
     return "OK", 200
 
-@app.route("/wake", methods=["GET"])
-def wake():
-    return "ok", 200
-
-MANUAL_TRIGGER_SECRET = os.getenv("MANUAL_TRIGGER_SECRET", "").strip()
-
 @app.route("/debug/run_weekly", methods=["POST", "GET"])
 def debug_run_weekly():
-    if MANUAL_TRIGGER_SECRET:
-        token = request.args.get("token", "") or request.headers.get("X-Run-Token", "")
-        if token != MANUAL_TRIGGER_SECRET:
+    secret = os.getenv("MANUAL_TRIGGER_SECRET", "")
+    if secret:
+        token = request.args.get("token", "")
+        if token != secret:
             return jsonify({"error": "forbidden"}), 403
     try:
         job_weekly()
-        return jsonify({"ok": True, "msg": "job_weekly executed"}), 200
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-@app.route("/debug/run_monthly", methods=["POST", "GET"])
-def debug_run_monthly():
-    if MANUAL_TRIGGER_SECRET:
-        token = request.args.get("token", "") or request.headers.get("X-Run-Token", "")
-        if token != MANUAL_TRIGGER_SECRET:
-            return jsonify({"error": "forbidden"}), 403
-    try:
-        job_monthly()
-        return jsonify({"ok": True, "msg": "job_monthly executed"}), 200
+        return jsonify({"ok": True, "msg": "Weekly report executed"}), 200
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -1459,89 +1283,99 @@ def debug_run_monthly():
 
 def start_scheduler():
     sched = BackgroundScheduler(timezone=TIMEZONE)
-
-    try:
-        if 'job_daily' in globals():
-            sched.add_job(job_daily, 'cron', hour=REMIND_HOUR, minute=REMIND_MINUTE, id='daily')
-    except Exception as e:
-        print("[ERROR] adding daily job:", e)
-
-    try:
-        if 'job_weekly' in globals():
-            sched.add_job(job_weekly, 'cron', day_of_week='sun', hour=WEEKLY_HOUR, minute=0, id='weekly')
-    except Exception as e:
-        print("[ERROR] adding weekly job:", e)
-
-    def monthly_wrapper():
-        today = datetime.datetime.now(TZ).date()
-        tomorrow = today + datetime.timedelta(days=1)
+    
+    # Daily reminder
+    sched.add_job(job_daily, 'cron', hour=REMIND_HOUR, minute=REMIND_MINUTE, id='daily')
+    print(f"  → Daily: {REMIND_HOUR:02d}:{REMIND_MINUTE:02d}")
+    
+    # Weekly report (Sunday evening)
+    sched.add_job(job_weekly, 'cron', day_of_week='sun', hour=WEEKLY_HOUR, minute=0, id='weekly')
+    print(f"  → Weekly: Sunday {WEEKLY_HOUR:02d}:00")
+    
+    # Monthly report
+    def monthly_check():
+        tomorrow = datetime.datetime.now(TZ).date() + datetime.timedelta(days=1)
         if tomorrow.day == 1:
-            try:
-                if 'job_monthly' in globals():
-                    job_monthly()
-            except Exception as e:
-                print("[ERROR] monthly job:", e)
-
-    try:
-        sched.add_job(monthly_wrapper, 'cron', hour=MONTHLY_HOUR, minute=0, id='monthly')
-    except Exception as e:
-        print("[ERROR] adding monthly wrapper:", e)
-
-    try:
-        sched.start()
-        print(f"[INFO] Scheduler started: daily at {REMIND_HOUR:02d}:{REMIND_MINUTE:02d} ({TIMEZONE})")
-    except Exception as e:
-        print("[ERROR] scheduler start failed:", e)
-
+            job_monthly()
+    
+    sched.add_job(monthly_check, 'cron', hour=MONTHLY_HOUR, minute=0, id='monthly_check')
+    print(f"  → Monthly: Day 1 at {MONTHLY_HOUR:02d}:00")
+    
+    sched.start()
     return sched
 
 def set_telegram_webhook():
-    if TELEGRAM_TOKEN and WEBHOOK_URL:
+    if TELEGRAM_TOKEN and WEBHOOK_URL := os.getenv("WEBHOOK_URL"):
         try:
-            r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook", data={"url": WEBHOOK_URL}, timeout=10)
-            print("setWebhook response:", r.status_code, r.json() if r.status_code == 200 else r.text)
+            r = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook",
+                data={"url": WEBHOOK_URL},
+                timeout=10
+            )
+            print(f"  → Webhook: {r.status_code}")
         except Exception as e:
-            print("Error setting webhook:", e)
+            print(f"  → Webhook error: {e}")
 
 # ============================================================================
 # MAIN
 # ============================================================================
 
 if __name__ == "__main__":
+    print("\n" + "="*70)
+    print("🤖 AI-POWERED WEEKLY REPORT SYSTEM")
+    print("="*70 + "\n")
+    
+    # Validate config
     if not NOTION_TOKEN or not REMIND_DB:
-        print("FATAL: NOTION_TOKEN or REMIND_NOTION_DATABASE not set. Exiting.")
+        print("❌ FATAL: Missing NOTION_TOKEN or REMIND_NOTION_DATABASE")
         raise SystemExit(1)
-
-    if "Authorization" not in HEADERS and NOTION_TOKEN:
-        HEADERS["Authorization"] = f"Bearer {NOTION_TOKEN}"
-
-    print("Notion configured:", bool(NOTION_TOKEN), REMIND_DB[:8] + "...")
-    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        print("Telegram configured: chat_id present.")
-    else:
-        print("Telegram NOT configured. Messages will print to console.")
-
-    if TELEGRAM_TOKEN and WEBHOOK_URL:
+    
+    if not OPENAI_API_KEY:
+        print("⚠️  WARNING: Missing OPENAI_API_KEY - AI features will use fallback")
+    
+    if not GOALS_DB:
+        print("⚠️  WARNING: Missing GOALS_NOTION_DATABASE - Cannot track goals")
+    
+    print("✓ Configuration loaded")
+    print(f"  → Notion DB: {REMIND_DB[:12]}...")
+    print(f"  → Goals DB: {GOALS_DB[:12] if GOALS_DB else 'NOT SET'}...")
+    print(f"  → OpenAI: {'ENABLED' if OPENAI_API_KEY else 'DISABLED'}")
+    print(f"  → Telegram: {'ENABLED' if TELEGRAM_TOKEN else 'DISABLED'}")
+    print()
+    
+    # Setup webhook if needed
+    if TELEGRAM_TOKEN:
         set_telegram_webhook()
-
+    
+    # Start scheduler
+    print("Starting scheduler...")
     start_scheduler()
-
+    print()
+    
+    # Run on start if enabled
     if RUN_ON_START:
+        print("🚀 Running initial job_daily...")
         try:
-            print("RUN_ON_START -> running job_daily() once.")
             job_daily()
         except Exception as e:
-            print("Error running job_daily on start:", e)
-
+            print(f"❌ Initial run failed: {e}")
+    
+    # Decide run mode
     BACKGROUND_WORKER = os.getenv("BACKGROUND_WORKER", "true").lower() in ("1", "true", "yes")
+    
     if BACKGROUND_WORKER:
-        print("Running in BACKGROUND_WORKER mode. Process will stay alive.")
+        print("="*70)
+        print("🔄 Running in BACKGROUND WORKER mode")
+        print("   Service will keep running for scheduled jobs")
+        print("="*70 + "\n")
         try:
             while True:
                 time.sleep(3600)
         except KeyboardInterrupt:
-            print("Shutting down.")
+            print("\n👋 Shutting down gracefully...")
     else:
         port = int(os.getenv("PORT", 5000))
-        print(f"Starting Flask server on port {port}.")
+        print("="*70)
+        print(f"🌐 Starting Flask server on port {port}")
+        print("="*70 + "\n")
         app.run(host="0.0.0.0", port=port, threaded=True)
