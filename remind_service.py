@@ -596,6 +596,15 @@ try:
     print(f"TEST AI RESPONSE: {test_ai}")
 except Exception as e:
     print(f"TEST AI FAILED: {e}")
+
+# FORCE TEST MODE - XÓA SAU KHI TEST XONG
+analysis_context['required_velocity'] = 8.5   # Giả lập cần tăng tốc mạnh
+analysis_context['tasks_remaining'] = 50
+analysis_context['days_remaining'] = 21
+analysis_context['goal_velocity'] = 2.0       # Tuần này chỉ 2
+analysis_context['detected_issues'] += "\n🚨 Cần tăng gấp 4 lần velocity để kịp deadline!"
+print("=== FORCE MODE: Tăng velocity để test AI thật ===")    
+
 # ============================================================================
 # JOB WEEKLY - VERSION MỚI: LUÔN GỌI AI, PHÂN TÍCH SÂU
 # ============================================================================
@@ -863,7 +872,20 @@ def job_weekly():
     
     print(f"\n✅ Weekly report sent successfully!")
     print(f"{'='*70}\n")
-
+    print("=== BẮT ĐẦU TEST KẾT NỐI TRỰC TIẾP VỚI AI ===")
+    try:
+        test_response = call_gpt([
+            {"role": "system", "content": "Bạn là trợ lý test. Chỉ trả lời đúng 1 câu duy nhất."},
+            {"role": "user", "content": "Hãy trả lời chính xác: 'GPT-4o-mini đang hoạt động hoàn toàn bình thường!'"}
+        ], temperature=0.5, max_tokens=100)
+        print("✓ TEST AI THÀNH CÔNG!")
+        print(f"AI trả lời: {test_response}")
+        send_telegram(f"🧪 TEST AI THÀNH CÔNG:\n{test_response}")
+    except Exception as e:
+        print("✗ TEST AI THẤT BẠI!")
+        print(f"Lỗi chi tiết: {e}")
+        send_telegram(f"❌ TEST AI THẤT BẠI:\n{e}")
+    print("=== KẾT THÚC TEST AI ===\n")
 # ============================================================================
 # JOB DAILY - SIMPLIFIED VERSION
 # ============================================================================
@@ -1415,5 +1437,6 @@ if __name__ == "__main__":
         print(f"🌐 Starting Flask server on port {port}")
         print("="*70 + "\n")
         app.run(host="0.0.0.0", port=port, threaded=True)
+
 
 
