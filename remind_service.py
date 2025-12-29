@@ -1288,6 +1288,17 @@ def debug_run_weekly():
         return jsonify({"ok": True, "msg": "Weekly report executed"}), 200
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+        
+@app.route("/debug/test_ai")
+def debug_test_ai():
+    from openai import OpenAI
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+    r = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "ping"}]
+    )
+    return {"reply": r.choices[0].message.content}
 
 # ============================================================================
 # SCHEDULER
@@ -1395,4 +1406,5 @@ if __name__ == "__main__":
         print(f"🌐 Starting Flask server on port {port}")
         print("="*70 + "\n")
         app.run(host="0.0.0.0", port=port, threaded=True)
+
 
