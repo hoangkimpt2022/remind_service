@@ -590,7 +590,12 @@ Tháng này hoàn thành {context['daily_done']} việc hằng ngày. {'Tiến b
 
 🔥 **CHALLENGE**
 Hoàn thành 30+ tasks hằng ngày tháng tới!"""
-
+print("=== FORCE TEST AI CALL ===")
+try:
+    test_ai = call_gpt([{"role": "user", "content": "Nói 'AI đang hoạt động bình thường' bằng tiếng Việt."}])
+    print(f"TEST AI RESPONSE: {test_ai}")
+except Exception as e:
+    print(f"TEST AI FAILED: {e}")
 # ============================================================================
 # JOB WEEKLY - VERSION MỚI: LUÔN GỌI AI, PHÂN TÍCH SÂU
 # ============================================================================
@@ -1410,4 +1415,5 @@ if __name__ == "__main__":
         print(f"🌐 Starting Flask server on port {port}")
         print("="*70 + "\n")
         app.run(host="0.0.0.0", port=port, threaded=True)
+
 
