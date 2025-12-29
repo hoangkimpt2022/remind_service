@@ -1305,16 +1305,20 @@ def start_scheduler():
     return sched
 
 def set_telegram_webhook():
-    if TELEGRAM_TOKEN and WEBHOOK_URL := os.getenv("WEBHOOK_URL"):
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
+    if TELEGRAM_TOKEN and WEBHOOK_URL:
         try:
             r = requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook",
                 data={"url": WEBHOOK_URL},
                 timeout=10
             )
-            print(f"  → Webhook: {r.status_code}")
+            print(f"  → Webhook set: {r.status_code}")
         except Exception as e:
             print(f"  → Webhook error: {e}")
+    else:
+        print("  → Webhook not set (missing TELEGRAM_TOKEN or WEBHOOK_URL)")
 
 # ============================================================================
 # MAIN
