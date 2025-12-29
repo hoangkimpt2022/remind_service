@@ -145,7 +145,36 @@ def overdue_days(page):
         return None
     today = datetime.datetime.now(TZ).date()
     return (today - due_dt.date()).days
+def month_range(date_obj):
+    """Trả về ngày đầu và cuối tháng của date_obj"""
+    year = date_obj.year
+    month = date_obj.month
+    start = datetime.date(year, month, 1)
+    # Ngày cuối tháng
+    next_month = start + relativedelta(months=1)
+    end = next_month - datetime.timedelta(days=1)
+    return start, end
 
+def format_dt(dt):
+    """Format datetime/date thành string dễ đọc"""
+    if not dt:
+        return ""
+    if isinstance(dt, datetime.datetime):
+        dt = dt.date()
+    return dt.strftime("%d/%m/%Y")
+
+def get_note_text(page):
+    """Lấy nội dung note từ property PROP_NOTE (rich text hoặc text)"""
+    try:
+        prop = page.get("properties", {}).get(PROP_NOTE, {})
+        if prop.get("type") == "rich_text":
+            return "".join([t.get("plain_text", "") for t in prop.get("rich_text", [])]).strip()
+        elif prop.get("type") == "text":
+            return prop.get("text", "")
+    except:
+        pass
+    return ""
+    
 def render_progress_bar(percent, total_blocks=10):
     """
     Render progress bar dạng text.
@@ -1381,3 +1410,4 @@ if __name__ == "__main__":
         print(f"🌐 Starting Flask server on port {port}")
         print("="*70 + "\n")
         app.run(host="0.0.0.0", port=port, threaded=True)
+
