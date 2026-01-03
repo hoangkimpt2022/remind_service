@@ -188,7 +188,43 @@ def week_range(date_obj):
     start = date_obj - datetime.timedelta(days=date_obj.weekday())
     end = start + datetime.timedelta(days=6)
     return start, end
+    
+def format_dt(dt):
+    """
+    Format datetime/date để hiển thị gọn gàng cho Telegram
+    - datetime -> dd/mm/yyyy HH:MM
+    - date     -> dd/mm/yyyy
+    """
+    if not dt:
+        return ""
 
+    try:
+        if isinstance(dt, datetime.datetime):
+            return dt.astimezone(TZ).strftime("%d/%m/%Y %H:%M")
+        if isinstance(dt, datetime.date):
+            return dt.strftime("%d/%m/%Y")
+    except Exception:
+        pass
+
+    return str(dt)
+
+def get_note_text(page):
+    """
+    Lấy nội dung note (rich_text) từ Notion page
+    Trả về string, an toàn không crash
+    """
+    try:
+        prop = page.get("properties", {}).get(PROP_NOTE, {})
+        if prop.get("type") == "rich_text":
+            texts = prop.get("rich_text", [])
+            return "".join(t.get("plain_text", "") for t in texts).strip()
+
+        # fallback nếu Notion trả structure khác
+        arr = prop.get("rich_text") or prop.get("title") or []
+        return "".join(t.get("plain_text", "") for t in arr).strip()
+    except Exception:
+        return ""
+        
 def send_telegram(text):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print(f"[TELEGRAM DISABLED]\n{text}\n")
@@ -241,23 +277,6 @@ def safe_formula(props, name):
     if f.get("string") is not None: return f["string"]
     if f.get("number") is not None: return f["number"]
     return None
-
-def get_note_text(page):
-    """
-    Lấy nội dung note (rich_text) từ Notion page
-    Trả về string, an toàn không crash
-    """
-    try:
-        prop = page.get("properties", {}).get(PROP_NOTE, {})
-        if prop.get("type") == "rich_text":
-            texts = prop.get("rich_text", [])
-            return "".join(t.get("plain_text", "") for t in texts).strip()
-
-        # fallback nếu Notion trả structure khác
-        arr = prop.get("rich_text") or prop.get("title") or []
-        return "".join(t.get("plain_text", "") for t in arr).strip()
-    except Exception:
-        return ""
         
 def safe_rollup(props, name):
     k = find_prop_key(props, name)
@@ -1403,4 +1422,5 @@ if __name__ == "__main__":
         print(f"🌐 Starting Flask server on port {port}")
         print("="*70 + "\n")
         app.run(host="0.0.0.0", port=port, threaded=True)
+
 
