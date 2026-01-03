@@ -242,6 +242,23 @@ def safe_formula(props, name):
     if f.get("number") is not None: return f["number"]
     return None
 
+def get_note_text(page):
+    """
+    Lấy nội dung note (rich_text) từ Notion page
+    Trả về string, an toàn không crash
+    """
+    try:
+        prop = page.get("properties", {}).get(PROP_NOTE, {})
+        if prop.get("type") == "rich_text":
+            texts = prop.get("rich_text", [])
+            return "".join(t.get("plain_text", "") for t in texts).strip()
+
+        # fallback nếu Notion trả structure khác
+        arr = prop.get("rich_text") or prop.get("title") or []
+        return "".join(t.get("plain_text", "") for t in arr).strip()
+    except Exception:
+        return ""
+        
 def safe_rollup(props, name):
     k = find_prop_key(props, name)
     if not k: return None
@@ -1386,3 +1403,4 @@ if __name__ == "__main__":
         print(f"🌐 Starting Flask server on port {port}")
         print("="*70 + "\n")
         app.run(host="0.0.0.0", port=port, threaded=True)
+
