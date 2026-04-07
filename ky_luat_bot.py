@@ -28,7 +28,7 @@ TZ = pytz.timezone("Asia/Ho_Chi_Minh")
 # Notion property names (khớp DB của Sếp)
 P_TITLE = "Việc cần làm"
 P_DATE = "Ngày"
-P_STATUS = "trang thái"
+P_STATUS = "trạng thái"
 P_ORDER = "STT/ngày"
 P_STREAK = "Chuỗi"
 
